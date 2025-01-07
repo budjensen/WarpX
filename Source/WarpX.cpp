@@ -1786,7 +1786,7 @@ WarpX::ReadParameters ()
                     }
 
                     // If there are other processes set energy tracking to true
-                    if ((do_MCC_ionization_tracking && nprocesses > 1) || 
+                    if ((do_MCC_ionization_tracking && nprocesses > 1) ||
                         (!do_MCC_ionization_tracking && nprocesses > 0)) {
                         do_MCC_energy_tracking = true;
                     }
