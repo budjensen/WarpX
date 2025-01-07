@@ -296,7 +296,7 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
             }
             auto wt = static_cast<amrex::Real>(amrex::second());
 
-            doBackgroundCollisionsWithinTile(pti, cur_time);
+            doBackgroundCollisionsWithinTile(lev, species1, pti, cur_time);
 
             if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
             {
@@ -315,9 +315,10 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
 
 
 void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
-( WarpXParIter& pti, amrex::Real t )
+( int lev, WarpXParticleContainer& const pc, WarpXParIter& pti, amrex::Real t )
 {
     using namespace amrex::literals;
+    using warpx::fields::FieldType;
 
     // So that CUDA code gets its intrinsic, not the host-only C++ library version
     using std::sqrt;
@@ -354,6 +355,22 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
     amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
 
+    // Set up collision tracking if enabled
+    if (WarpX::do_MCC_energy_tracking) {
+        // get Struct-Of-Array particle data
+        amrex::ParticleReal* const AMREX_RESTRICT w  = attribs[PIdx::w].dataPtr();
+
+        // get multi-fab for collisional energy transfer (does this need to be moved out of the pti loop?)
+        const amrex::MultiFab &coll_E_change = *warpx.m_fields.get(FieldType::collision_energy_change, lev);
+        const auto& coll_E_change_arr = coll_E_change[pti].array()
+
+        // get parameters for getParticleCell (method used here is similar to TemperatureFunctor.cpp)
+        auto& tile = pti.GetParticleTile();
+        auto ptd = tile.getParticleTileData();
+        const auto plo = pc.Geom(lev).ProbLoArray();
+        const auto dxi = pc.Geom(lev).InvCellSizeArray();
+    }
+
     amrex::ParallelForRNG(np,
                           [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
                           {
@@ -366,8 +383,8 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                               const amrex::ParticleReal n_a = n_a_func(x, y, z, t);
                               const amrex::ParticleReal T_a = T_a_func(x, y, z, t);
 
-                              amrex::ParticleReal v_coll, v_coll2, sigma_E, nu_i = 0;
-                              double gamma, E_coll;
+                              amrex::ParticleReal v_coll, v_coll2, sigma_E, nu_i = 0, v_lost2;
+                              double gamma, E_coll, E_lost;
                               amrex::ParticleReal ua_x, ua_y, ua_z, vx, vy, vz;
                               amrex::ParticleReal uCOM_x, uCOM_y, uCOM_z;
                               const amrex::ParticleReal col_select = amrex::Random(engine);
@@ -406,6 +423,11 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                   // check if this collision should be performed
                                   if (col_select > nu_i) { continue; }
 
+                                  // get the initial particle energy for tracking
+                                  if (WarpX::do_MCC_energy_tracking) {
+                                      v_lost2 = ux[ip]*ux[ip] + uy[ip]*uy[ip] + uz[ip]*uz[ip];
+                                  }
+
                                   // charge exchange is implemented as a simple swap of the projectile
                                   // and target velocities which doesn't require any of the Lorentz
                                   // transformations below; note that if the projectile and target
@@ -414,6 +436,20 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                       ux[ip] = ua_x;
                                       uy[ip] = ua_y;
                                       uz[ip] = ua_z;
+
+                                      if (WarpX::do_MCC_energy_tracking) {
+                                          // Calculate the energy lost for tracking
+                                          v_lost2 -= ux[ip]*ux[ip] + uy[ip]*uy[ip] + uz[ip]*uz[ip];
+                                          ParticleUtils::getEnergy(v_lost2, m, E_lost);
+
+                                          // store the energy (add E_lost * w[ip] to the buffer of energy sent to the background)
+                                          // get the particle's cell index (method used here is similar to TemperatureFunctor.cpp)
+                                          const auto p = WarpXParticleContainer::ParticleType(ptd, ip);
+                                          const auto [ii, jj, kk] = amrex::getParticleCell(p , plo, dxi).dim3();
+
+                                          // store energy lost in the buffer
+                                          coll_E_change_arr(ii, jj, kk, 0) += E_lost * w[ip];
+                                      }
                                       break;
                                   }
 
@@ -459,6 +495,20 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                   ux[ip] = vx + ua_x;
                                   uy[ip] = vy + ua_y;
                                   uz[ip] = vz + ua_z;
+
+                                  if (WarpX::do_MCC_energy_tracking) {
+                                      // Calculate difference in energy for tracking
+                                      v_lost2 -= ux[ip]*ux[ip] + uy[ip]*uy[ip] + uz[ip]*uz[ip];
+                                      ParticleUtils::getEnergy(v_lost2, m, E_lost);
+
+                                      // store the energy (add E_lost * w[ip] to the buffer of energy sent to the background)
+                                      // get the particle's cell index (method used here is similar to TemperatureFunctor.cpp)
+                                      const auto p = WarpXParticleContainer::ParticleType(ptd, ip);
+                                      const auto [ii, jj, kk] = amrex::getParticleCell(p , plo, dxi).dim3();
+
+                                      // store energy lost in the buffer
+                                      coll_E_change_arr(ii, jj, kk, 0) += E_lost * w[ip];
+                                  }
                                   break;
                               }
                           }
