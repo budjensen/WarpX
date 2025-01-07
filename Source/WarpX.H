@@ -868,6 +868,10 @@ public:
     static amrex::Real moving_window_v;
     static bool fft_do_time_averaging;
 
+    // Control whether Monte Carlo Collision statistics are collected
+    static bool do_MCC_energy_tracking;
+    static bool do_MCC_ionization_tracking;
+
     // these should be private, but can't due to Cuda limitations
     static void ComputeDivB (amrex::MultiFab& divB, int dcomp,
                              ablastr::fields::VectorField const & B,

@@ -81,7 +81,9 @@ namespace warpx::fields
         Bfield_avg_cp,
         B_old, /**< Stores the value of B at the beginning of the timestep, for the implicit solver */
         ECTRhofield,
-        Venl
+        Venl,
+        collision_energy_change, /**< Stores collisional energy transfer data for Monte Carlo Collisions */
+        collision_ionization /**< Stores ionization data for Monte Carlo Collisions */
     );
 
     /** these are vector fields */

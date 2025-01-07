@@ -104,6 +104,9 @@ Real WarpX::moving_window_v = std::numeric_limits<amrex::Real>::max();
 
 bool WarpX::fft_do_time_averaging = false;
 
+bool WarpX::do_MCC_energy_tracking = false;
+bool WarpX::do_MCC_ionization_tracking = false;
+
 amrex::IntVect WarpX::m_fill_guards_fields  = amrex::IntVect(0);
 amrex::IntVect WarpX::m_fill_guards_current = amrex::IntVect(0);
 
@@ -1744,6 +1747,53 @@ WarpX::ReadParameters ()
             }
         }
     }
+
+    // set flags for MCC collision tracking
+    // TODO: set an option for only tracking certain collisions
+    {
+        const ParmParse pp_collisions("collisions");
+
+        // Check if MCC tracking is turned off
+        int MCC_tracking = 1;
+        pp_collisions.query("mcc_tracking", MCC_tracking);
+
+        if (MCC_tracking) {
+            std::vector<std::string> collision_names;
+            pp_collisions.queryarr("collision_names", collision_names);
+
+            // Look through collision types for MCC
+            auto const ncollisions = collision_names.size();
+            for (int i = 0; i < static_cast<int>(ncollisions); ++i) {
+                const ParmParse pp_collision_name(collision_names[i]);
+
+                // For legacy, pairwisecoulomb is the default
+                std::string type = "pairwisecoulomb";
+
+                pp_collision_name.query("type", type);
+
+                // Check any MCC scattering processes
+                if (type == "background_mcc") {
+                    std::vector<std::string> scattering_processes;
+                    pp_collision_name.queryarr("scattering_processes", scattering_processes);
+
+                    // Look through scattering processes for ionization
+                    auto const nprocesses = scattering_processes.size();
+                    for (int j = 0; j < static_cast<int>(nprocesses); ++j) {
+                        // Set ionization tracking to true
+                        if (scattering_processes[j] == "ionization") {
+                            do_MCC_ionization_tracking = true;
+                        }
+                    }
+
+                    // If there are other processes set energy tracking to true
+                    if ((do_MCC_ionization_tracking && nprocesses > 1) || 
+                        (!do_MCC_ionization_tracking && nprocesses > 0)) {
+                        do_MCC_energy_tracking = true;
+                    }
+                }
+            }
+        }
+    }
 }
 
 void
@@ -2224,6 +2274,22 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
     m_fields.alloc_init(FieldType::current_fp, Direction{0}, lev, amrex::convert(ba, jx_nodal_flag), dm, ncomps, ngJ, 0.0_rt);
     m_fields.alloc_init(FieldType::current_fp, Direction{1}, lev, amrex::convert(ba, jy_nodal_flag), dm, ncomps, ngJ, 0.0_rt);
     m_fields.alloc_init(FieldType::current_fp, Direction{2}, lev, amrex::convert(ba, jz_nodal_flag), dm, ncomps, ngJ, 0.0_rt);
+
+    // Allocate extra multifabs needed for MCC collision tracking
+    if (do_MCC_ionization_tracking || do_MCC_energy_tracking) {
+        // 1 component per cell (either energy change or ionization)
+        int MCC_ncomps = 1;
+
+        // Prepare to initialize a cell-centered MultiFab
+        amrex::IntVect MCC_nodal_flag = amrex::IntVect::TheCellVector();
+
+        if (do_MCC_energy_tracking) {
+            m_fields.alloc_init(FieldType::collision_energy_change, lev, amrex::convert(ba, MCC_nodal_flag), dm, MCC_ncomps, 0, 0.0_rt);
+        }
+        if (do_MCC_ionization_tracking) {
+            m_fields.alloc_init(FieldType::collision_ionization, lev, amrex::convert(ba, MCC_nodal_flag), dm, MCC_ncomps, 0, 0.0_rt);
+        }
+    }
 
     if (do_current_centering)
     {
