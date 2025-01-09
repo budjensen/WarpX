@@ -520,6 +520,8 @@ void BackgroundMCCCollision::doBackgroundIonization
 ( int lev, amrex::LayoutData<amrex::Real>* cost,
   WarpXParticleContainer& species1, WarpXParticleContainer& species2, amrex::Real t)
 {
+    using warpx::fields::FieldType;
+
     WARPX_PROFILE("BackgroundMCCCollision::doBackgroundIonization()");
 
     const SmartCopyFactory copy_factory_elec(species1, species1);
@@ -534,6 +536,15 @@ void BackgroundMCCCollision::doBackgroundIonization
                                                    );
 
     const amrex::ParticleReal sqrt_kb_m = std::sqrt(PhysConst::kb / m_background_mass);
+
+    if (WarpX::do_MCC_ionization_tracking)
+    {
+        const amrex::MultiFab &coll_ionization = *warpx.m_fields.get(FieldType::collision_ionization, lev);
+
+        // get parameters for getParticleCell
+        const auto plo = species1.Geom(lev).ProbLoArray();
+        const auto dxi = species1.Geom(lev).InvCellSizeArray();
+    }
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -564,6 +575,36 @@ void BackgroundMCCCollision::doBackgroundIonization
 
         setNewParticleIDs(elec_tile, np_elec, num_added);
         setNewParticleIDs(ion_tile, np_ion, num_added);
+
+        if (WarpX::do_MCC_ionization_tracking)
+        {
+            // get parameters for getParticleCell (method used here is similar to TemperatureFunctor.cpp)
+            // should these lines be removed and we just do ptd = elec_tile.getParticleTileData()?
+            auto& tile = pti.GetParticleTile();
+            auto ptd = tile.getParticleTileData();
+
+            // get multi-fab for ionization creation tracking
+            const auto& coll_ionization_arr = coll_ionization[pti].array();
+
+            // get Struct-Of-Array particle data
+            // as long as w is set after the copy, will it include newly created particles (be of length np_elec + num_added)?
+            auto& attribs = pti.GetAttribs();
+            amrex::ParticleReal* const AMREX_RESTRICT w  = attribs[PIdx::w].dataPtr();
+
+            // add each created particle to tracking buffer
+            amrex::ParallelFor(num_added,
+                               [=] AMREX_GPU_HOST_DEVICE (long ip)
+                               {
+                               // store the energy (add E_lost * w[ip] to the buffer of energy sent to the background)
+                               // get the particle's cell index (method used here is similar to TemperatureFunctor.cpp)
+                               const auto p = WarpXParticleContainer::ParticleType(ptd, ip + np_elec);
+                               const auto [ii, jj, kk] = amrex::getParticleCell(p , plo, dxi).dim3();
+
+                               // store energy lost in the buffer
+                               coll_ionization_arr(ii, jj, kk, 0) += w[ip + np_elec];
+                               }
+                               );
+        }
 
         if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
         {
