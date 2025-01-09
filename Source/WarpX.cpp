@@ -2280,14 +2280,17 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
         // 1 component per cell (either energy change or ionization)
         int MCC_ncomps = 1;
 
+        // Zero guard cells
+        IntVect ngMCC = IntVect::TheZeroVector();
+
         // Prepare to initialize a cell-centered MultiFab
-        amrex::IntVect MCC_nodal_flag = amrex::IntVect::TheCellVector();
+        IntVect MCC_nodal_flag = IntVect::TheCellVector();
 
         if (do_MCC_energy_tracking) {
-            m_fields.alloc_init(FieldType::collision_energy_change, lev, amrex::convert(ba, MCC_nodal_flag), dm, MCC_ncomps, 0, 0.0_rt);
+            m_fields.alloc_init(FieldType::collision_energy_change, lev, amrex::convert(ba, MCC_nodal_flag), dm, MCC_ncomps, ngMCC, 0.0_rt);
         }
         if (do_MCC_ionization_tracking) {
-            m_fields.alloc_init(FieldType::collision_ionization, lev, amrex::convert(ba, MCC_nodal_flag), dm, MCC_ncomps, 0, 0.0_rt);
+            m_fields.alloc_init(FieldType::collision_ionization, lev, amrex::convert(ba, MCC_nodal_flag), dm, MCC_ncomps, ngMCC, 0.0_rt);
         }
     }
 
