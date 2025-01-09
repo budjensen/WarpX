@@ -323,6 +323,9 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     // So that CUDA code gets its intrinsic, not the host-only C++ library version
     using std::sqrt;
 
+    // get pointer to warpx instance, for multifab retrieval
+    auto & warpx = WarpX::GetInstance();
+
     // get particle count
     const long np = pti.numParticles();
 
@@ -354,22 +357,17 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     amrex::ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
     amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
     amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
+    amrex::ParticleReal* const AMREX_RESTRICT w  = attribs[PIdx::w].dataPtr();
 
-    // Set up collision tracking if enabled
-    if (WarpX::do_MCC_energy_tracking) {
-        // get Struct-Of-Array particle data
-        amrex::ParticleReal* const AMREX_RESTRICT w  = attribs[PIdx::w].dataPtr();
+    // get multi-fab for collisional energy transfer (does this need to be moved out of the pti loop?)
+    const amrex::MultiFab &coll_E_change = *warpx.m_fields.get(FieldType::collision_energy_change, lev);
+    const auto& coll_E_change_arr = coll_E_change[pti].array();
 
-        // get multi-fab for collisional energy transfer (does this need to be moved out of the pti loop?)
-        const amrex::MultiFab &coll_E_change = *warpx.m_fields.get(FieldType::collision_energy_change, lev);
-        const auto& coll_E_change_arr = coll_E_change[pti].array()
-
-        // get parameters for getParticleCell (method used here is similar to TemperatureFunctor.cpp)
-        auto& tile = pti.GetParticleTile();
-        auto ptd = tile.getParticleTileData();
-        const auto plo = species1.Geom(lev).ProbLoArray();
-        const auto dxi = species1.Geom(lev).InvCellSizeArray();
-    }
+    // get parameters for getParticleCell (method used here is similar to TemperatureFunctor.cpp)
+    auto& tile = pti.GetParticleTile();
+    auto ptd = tile.getParticleTileData();
+    const auto plo = species1.Geom(lev).ProbLoArray();
+    const auto dxi = species1.Geom(lev).InvCellSizeArray();
 
     amrex::ParallelForRNG(np,
                           [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
@@ -524,6 +522,9 @@ void BackgroundMCCCollision::doBackgroundIonization
 
     WARPX_PROFILE("BackgroundMCCCollision::doBackgroundIonization()");
 
+    // get pointer to warpx instance, for multifab retrieval
+    auto & warpx = WarpX::GetInstance();
+
     const SmartCopyFactory copy_factory_elec(species1, species1);
     const SmartCopyFactory copy_factory_ion(species1, species2);
     const auto CopyElec = copy_factory_elec.getSmartCopy();
@@ -537,14 +538,12 @@ void BackgroundMCCCollision::doBackgroundIonization
 
     const amrex::ParticleReal sqrt_kb_m = std::sqrt(PhysConst::kb / m_background_mass);
 
-    if (WarpX::do_MCC_ionization_tracking)
-    {
-        const amrex::MultiFab &coll_ionization = *warpx.m_fields.get(FieldType::collision_ionization, lev);
+    // get multi-fab for ionization creation tracking
+    const amrex::MultiFab &coll_ionization = *warpx.m_fields.get(FieldType::collision_ionization, lev);
 
-        // get parameters for getParticleCell
-        const auto plo = species1.Geom(lev).ProbLoArray();
-        const auto dxi = species1.Geom(lev).InvCellSizeArray();
-    }
+    // get parameters for getParticleCell
+    const auto plo = species1.Geom(lev).ProbLoArray();
+    const auto dxi = species1.Geom(lev).InvCellSizeArray();
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -583,7 +582,7 @@ void BackgroundMCCCollision::doBackgroundIonization
             auto& tile = pti.GetParticleTile();
             auto ptd = tile.getParticleTileData();
 
-            // get multi-fab for ionization creation tracking
+            // get multi-fab array for ionization creation tracking
             const auto& coll_ionization_arr = coll_ionization[pti].array();
 
             // get Struct-Of-Array particle data
