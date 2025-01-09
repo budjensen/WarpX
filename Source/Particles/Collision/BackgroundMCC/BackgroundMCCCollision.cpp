@@ -315,7 +315,7 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
 
 
 void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
-( int lev, WarpXParticleContainer& const pc, WarpXParIter& pti, amrex::Real t )
+( int lev, WarpXParticleContainer& species1, WarpXParIter& pti, amrex::Real t )
 {
     using namespace amrex::literals;
     using warpx::fields::FieldType;
@@ -367,8 +367,8 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
         // get parameters for getParticleCell (method used here is similar to TemperatureFunctor.cpp)
         auto& tile = pti.GetParticleTile();
         auto ptd = tile.getParticleTileData();
-        const auto plo = pc.Geom(lev).ProbLoArray();
-        const auto dxi = pc.Geom(lev).InvCellSizeArray();
+        const auto plo = species1.Geom(lev).ProbLoArray();
+        const auto dxi = species1.Geom(lev).InvCellSizeArray();
     }
 
     amrex::ParallelForRNG(np,

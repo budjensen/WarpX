@@ -46,12 +46,12 @@ public:
     /** Perform particle conserving MCC collisions within a tile
      *
      * @param lev the mesh-refinement level
-     * @param pti particle container
+     * @param species1 reference to colliding species container
      * @param pti particle iterator
      * @param t current time
      *
      */
-    void doBackgroundCollisionsWithinTile ( int lev, WarpXParticleContainer& const pc, WarpXParIter& pti, amrex::Real t);
+    void doBackgroundCollisionsWithinTile ( int lev, WarpXParticleContainer& species1, WarpXParIter& pti, amrex::Real t);
 
     /** Perform MCC ionization interactions
      *
