@@ -1031,10 +1031,12 @@ def GCPPMLWrapper(level=0, include_ghosts=False):
         mf_name="pml_G_cp", level=level, include_ghosts=include_ghosts
     )
 
+
 def MCCEnergyWrapper(level=0, include_ghosts=False):
     return _MultiFABWrapper(
         mf_name="collision_energy_change", level=level, include_ghosts=include_ghosts
     )
+
 
 def MCCIonizWrapper(level=0, include_ghosts=False):
     return _MultiFABWrapper(
