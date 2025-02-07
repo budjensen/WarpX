@@ -77,9 +77,9 @@ ScatteringProcess::init (const std::string& scattering_process, const amrex::Par
 ScatteringProcessType
 ScatteringProcess::parseProcessType(const std::string& scattering_process)
 {
-    if (scattering_process == "elastic") {
+    if (scattering_process.find("elastic") != std::string::npos) {
         return ScatteringProcessType::ELASTIC;
-    } else if (scattering_process == "back") {
+    } else if (scattering_process.find("back") != std::string::npos) {
         return ScatteringProcessType::BACK;
     } else if (scattering_process == "charge_exchange") {
         return ScatteringProcessType::CHARGE_EXCHANGE;
