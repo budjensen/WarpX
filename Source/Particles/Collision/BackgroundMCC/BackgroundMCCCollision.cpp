@@ -359,9 +359,9 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
     amrex::ParticleReal* const AMREX_RESTRICT w  = attribs[PIdx::w].dataPtr();
 
-    // get multi-fab for collisional energy transfer (does this need to be moved out of the pti loop?)
-    const amrex::MultiFab &coll_E_change = *warpx.m_fields.get(FieldType::collision_energy_change, lev);
-    const auto& coll_E_change_arr = coll_E_change[pti].array();
+    // get multi-fab for collisional energy transfer tracking
+    auto& coll_E_change = *warpx.m_fields.get(FieldType::collision_energy_change, lev);
+    amrex::Array4<amrex::Real> const& coll_E_change_arr = coll_E_change.array(pti);
 
     // get parameters for getParticleCell (method used here is similar to TemperatureFunctor.cpp)
     auto& tile = pti.GetParticleTile();
@@ -436,17 +436,19 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                       uz[ip] = ua_z;
 
                                       if (WarpX::do_MCC_energy_tracking) {
-                                          // Calculate the energy lost for tracking
-                                          v_lost2 -= ux[ip]*ux[ip] + uy[ip]*uy[ip] + uz[ip]*uz[ip];
-                                          ParticleUtils::getEnergy(v_lost2, m, E_lost);
+                                        // Calculate the energy lost for tracking
+                                        v_lost2 -= ux[ip]*ux[ip] + uy[ip]*uy[ip] + uz[ip]*uz[ip];
+                                        ParticleUtils::getEnergy(v_lost2, m, E_lost);
 
-                                          // store the energy (add E_lost * w[ip] to the buffer of energy sent to the background)
-                                          // get the particle's cell index (method used here is similar to TemperatureFunctor.cpp)
-                                          const auto p = WarpXParticleContainer::ParticleType(ptd, ip);
-                                          const auto [ii, jj, kk] = amrex::getParticleCell(p , plo, dxi).dim3();
+                                        // Get particle cell index
+                                        const auto p = WarpXParticleContainer::ParticleType(ptd, ip);
+                                        const auto [ii, jj, kk] = amrex::getParticleCell(p, plo, dxi).dim3();
 
-                                          // store energy lost in the buffer
-                                          coll_E_change_arr(ii, jj, kk, 0) += E_lost * w[ip];
+                                        // Calculate energy change and convert to correct type
+                                        const amrex::Real E_change = static_cast<amrex::Real>(E_lost * w[ip]);
+
+                                        // Add matching TemperatureFunctor.cpp's style
+                                        amrex::Gpu::Atomic::AddNoRet(&coll_E_change_arr(ii, jj, kk, 0), E_change);
                                       }
                                       break;
                                   }
@@ -495,17 +497,19 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                   uz[ip] = vz + ua_z;
 
                                   if (WarpX::do_MCC_energy_tracking) {
-                                      // Calculate difference in energy for tracking
-                                      v_lost2 -= ux[ip]*ux[ip] + uy[ip]*uy[ip] + uz[ip]*uz[ip];
-                                      ParticleUtils::getEnergy(v_lost2, m, E_lost);
+                                    // Calculate the energy lost for tracking
+                                    v_lost2 -= ux[ip]*ux[ip] + uy[ip]*uy[ip] + uz[ip]*uz[ip];
+                                    ParticleUtils::getEnergy(v_lost2, m, E_lost);
 
-                                      // store the energy (add E_lost * w[ip] to the buffer of energy sent to the background)
-                                      // get the particle's cell index (method used here is similar to TemperatureFunctor.cpp)
-                                      const auto p = WarpXParticleContainer::ParticleType(ptd, ip);
-                                      const auto [ii, jj, kk] = amrex::getParticleCell(p , plo, dxi).dim3();
+                                    // Get particle cell index
+                                    const auto p = WarpXParticleContainer::ParticleType(ptd, ip);
+                                    const auto [ii, jj, kk] = amrex::getParticleCell(p, plo, dxi).dim3();
 
-                                      // store energy lost in the buffer
-                                      coll_E_change_arr(ii, jj, kk, 0) += E_lost * w[ip];
+                                    // Calculate energy change and convert to correct type
+                                    const amrex::Real E_change = static_cast<amrex::Real>(E_lost * w[ip]);
+
+                                    // Atomic add matching TemperatureFunctor.cpp style
+                                    amrex::Gpu::Atomic::AddNoRet(&coll_E_change_arr(ii, jj, kk, 0), E_change);
                                   }
                                   break;
                               }
@@ -539,7 +543,7 @@ void BackgroundMCCCollision::doBackgroundIonization
     const amrex::ParticleReal sqrt_kb_m = std::sqrt(PhysConst::kb / m_background_mass);
 
     // get multi-fab for ionization creation tracking
-    const amrex::MultiFab &coll_ionization = *warpx.m_fields.get(FieldType::collision_ionization, lev);
+    amrex::MultiFab &coll_ionization = *warpx.m_fields.get(FieldType::collision_ionization, lev);
 
     // get parameters for getParticleCell
     const auto plo = species1.Geom(lev).ProbLoArray();
@@ -583,7 +587,7 @@ void BackgroundMCCCollision::doBackgroundIonization
             auto ptd = tile.getParticleTileData();
 
             // get multi-fab array for ionization creation tracking
-            const auto& coll_ionization_arr = coll_ionization[pti].array();
+            amrex::Array4<amrex::Real> const& coll_ionization_arr = coll_ionization.array(pti);
 
             // get Struct-Of-Array particle data
             // as long as w is set after the copy, will it include newly created particles (be of length np_elec + num_added)?
@@ -594,13 +598,15 @@ void BackgroundMCCCollision::doBackgroundIonization
             amrex::ParallelFor(num_added,
                                [=] AMREX_GPU_HOST_DEVICE (long ip)
                                {
-                               // store the energy (add E_lost * w[ip] to the buffer of energy sent to the background)
-                               // get the particle's cell index (method used here is similar to TemperatureFunctor.cpp)
-                               const auto p = WarpXParticleContainer::ParticleType(ptd, ip + np_elec);
-                               const auto [ii, jj, kk] = amrex::getParticleCell(p , plo, dxi).dim3();
+                                // Get particle cell index
+                                const auto p = WarpXParticleContainer::ParticleType(ptd, ip + np_elec);
+                                const auto [ii, jj, kk] = amrex::getParticleCell(p, plo, dxi).dim3();
 
-                               // store energy lost in the buffer
-                               coll_ionization_arr(ii, jj, kk, 0) += w[ip + np_elec];
+                                // Get weight added to the simulation and convert to correct type
+                                const amrex::Real ioniz_w = static_cast<amrex::Real>(w[ip + np_elec]);
+
+                                // Add matching TemperatureFunctor.cpp's style
+                                amrex::Gpu::Atomic::AddNoRet(&coll_ionization_arr(ii, jj, kk, 0), ioniz_w);
                                }
                                );
         }
