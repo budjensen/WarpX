@@ -445,6 +445,14 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                       vz *= scale_fac;
                                   }
 
+                                  // Skip Lorentz transformations when projectile does not scatter
+                                  if (scattering_process.m_type == ScatteringProcessType::FORWARD) {
+                                      ux[ip] = vx;
+                                      uy[ip] = vy;
+                                      uz[ip] = vz;
+                                      break;
+                                  }
+
                                   // transform to COM frame
                                   ParticleUtils::doLorentzTransform(vx, vy, vz, uCOM_x, uCOM_y, uCOM_z);
 
