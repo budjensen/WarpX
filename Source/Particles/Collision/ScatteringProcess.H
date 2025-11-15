@@ -22,6 +22,7 @@ enum class ScatteringProcessType {
     EXCITATION,
     IONIZATION,
     FORWARD,
+    RECOMBINATION
 };
 
 class ScatteringProcess

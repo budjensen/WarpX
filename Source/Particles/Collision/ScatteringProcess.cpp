@@ -89,6 +89,8 @@ ScatteringProcess::parseProcessType(const std::string& scattering_process)
         return ScatteringProcessType::EXCITATION;
     } else if (scattering_process.find("forward") != std::string::npos) {
         return ScatteringProcessType::FORWARD;
+    } else if (scattering_process == "recombination") {
+        return ScatteringProcessType::RECOMBINATION;
     } else {
         return ScatteringProcessType::INVALID;
     }
