@@ -2589,6 +2589,44 @@ class DSMCCollisions(picmistandard.base._ClassWithInit):
                 collision.add_new_attr(process + "_" + key, val)
 
 
+class RecombinationCollisions(picmistandard.base._ClassWithInit):
+    """
+    Custom class to handle setup of recombination collisions in WarpX. If collision
+    initialization is added to picmistandard this can be changed to inherit
+    that functionality.
+
+    Parameters
+    ----------
+    name: string
+        Name of instance (used in the inputs file)
+
+    species: species instance
+        The species involved in the collision
+
+    cross_section: string
+        The cross section to use
+
+    ndt: integer, optional
+        The collisions will be applied every "ndt" steps. Must be 1 or larger.
+    """
+
+    def __init__(self, name, species, cross_section, ndt=None, **kw):
+        self.name = name
+        self.species = species
+        self.cross_section = cross_section
+        self.ndt = ndt
+
+        self.handle_init(kw)
+
+    def collision_initialize_inputs(self):
+        collision = pywarpx.Collisions.newcollision(self.name)
+        collision.type = "recombination"
+        collision.species = [species.name for species in self.species]
+        collision.ndt = self.ndt
+
+        collision.cross_section = self.cross_section
+
+
 class EmbeddedBoundary(picmistandard.base._ClassWithInit):
     """
     Custom class to handle set up of embedded boundaries specific to WarpX.
