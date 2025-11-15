@@ -34,6 +34,9 @@ namespace BinaryCollisionUtils{
         else if (type == "dsmc") {
             return CollisionType::DSMC;
         }
+        else if (type == "recombination") {
+            return CollisionType::Recombination;
+        }
         return CollisionType::Undefined;
     }
 

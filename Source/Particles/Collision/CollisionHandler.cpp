@@ -13,6 +13,7 @@
 #include "Particles/Collision/BinaryCollision/DSMC/DSMCFunc.H"
 #include "Particles/Collision/BinaryCollision/DSMC/SplitAndScatterFunc.H"
 #include "Particles/Collision/BinaryCollision/NuclearFusion/NuclearFusionFunc.H"
+#include "Particles/Collision/BinaryCollision/Recombination/RecombinationFunc.H"
 #include "Particles/Collision/BinaryCollision/ParticleCreationFunc.H"
 #include "Utils/TextMsg.H"
 
@@ -64,6 +65,12 @@ CollisionHandler::CollisionHandler(MultiParticleContainer const * const mypc)
         else if (type == "nuclearfusion") {
             allcollisions[i] =
                std::make_unique<BinaryCollision<NuclearFusionFunc, ParticleCreationFunc>>(
+                    collision_names[i], mypc
+                );
+        }
+        else if (type == "recombination") {
+            allcollisions[i] =
+                std::make_unique<BinaryCollision<RecombinationFunc, NoParticleCreationFunc>>(
                     collision_names[i], mypc
                 );
         }

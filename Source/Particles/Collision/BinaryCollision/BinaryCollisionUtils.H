@@ -21,6 +21,7 @@ enum struct CollisionType { DeuteriumTritiumToNeutronHeliumFusion,
                             ProtonBoronToAlphasFusion,
                             DSMC,
                             PairwiseCoulomb,
+                            Recombination,
                             Undefined };
 
 enum struct NuclearFusionType {
