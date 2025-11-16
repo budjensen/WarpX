@@ -2606,14 +2606,18 @@ class RecombinationCollisions(picmistandard.base._ClassWithInit):
     cross_section: string
         The cross section to use
 
+    max_energy: float
+        The maximum relative energy (in eV) for recombination
+
     ndt: integer, optional
         The collisions will be applied every "ndt" steps. Must be 1 or larger.
     """
 
-    def __init__(self, name, species, cross_section, ndt=None, **kw):
+    def __init__(self, name, species, cross_section, max_energy, ndt=None, **kw):
         self.name = name
         self.species = species
         self.cross_section = cross_section
+        self.max_energy = max_energy
         self.ndt = ndt
 
         self.handle_init(kw)
@@ -2625,6 +2629,7 @@ class RecombinationCollisions(picmistandard.base._ClassWithInit):
         collision.ndt = self.ndt
 
         collision.cross_section = self.cross_section
+        collision.max_energy = self.max_energy
 
 
 class EmbeddedBoundary(picmistandard.base._ClassWithInit):

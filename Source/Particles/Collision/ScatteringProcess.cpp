@@ -57,7 +57,7 @@ ScatteringProcess::init (const std::string& scattering_process, const amrex::Par
     // check that the cross-section is 0 at the energy cost if the energy
     // cost is > 0 - this is to prevent the possibility of negative left
     // over energy after a collision event
-    if (m_exe_h.m_energy_penalty > 0) {
+    if (m_exe_h.m_energy_penalty > 0 and m_exe_h.m_type != ScatteringProcessType::RECOMBINATION) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             (getCrossSection(m_exe_h.m_energy_penalty) == 0),
             "Cross-section > 0 at energy cost for collision."

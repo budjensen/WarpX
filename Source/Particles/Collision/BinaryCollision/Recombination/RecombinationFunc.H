@@ -154,6 +154,19 @@ public:
                 // Convert collision energy from Joules to eV for cross section lookup
                 E_coll_eV /= PhysConst::q_e;
 
+                // If energy is above the maximum energy, skip this pair (use energy penalty for recombination maximum)
+                if (E_coll_eV > m_recombination_process.m_energy_penalty) {
+#if (defined WARPX_DIM_RZ)
+                    /* Undo the earlier velocity rotation */
+                    amrex::ParticleReal const u1xbuf_new = u1x[I1[i1]];
+                    u1x[I1[i1]] = u1xbuf_new*std::cos(-theta) - u1y[I1[i1]]*std::sin(-theta);
+                    u1y[I1[i1]] = u1xbuf_new*std::sin(-theta) + u1y[I1[i1]]*std::cos(-theta);
+#endif
+                    if (max_N == NI1) { i1 += min_N; }
+                    if (max_N == NI2) { i2 += min_N; }
+                    continue;
+                }
+
                 // Get cross section at this collision energy
                 const amrex::ParticleReal sigma = m_recombination_process.getCrossSection(E_coll_eV);
 

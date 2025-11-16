@@ -25,8 +25,9 @@ RecombinationFunc::RecombinationFunc (
         "Recombination collision '" + collision_name +
         "' requires a 'cross_section' parameter specifying the cross section data file.");
 
-    // Recombination doesn't have an energy penalty (particles are removed, not de-excited)
+    // Recombination replaces the energy cost with the maximum energy
     amrex::ParticleReal energy = 0._prt;
+    pp_collision_name.query("max_energy", energy);
 
     // Create the scattering process for recombination
     // We use a generic "recombination" process type which will be treated as absorption
