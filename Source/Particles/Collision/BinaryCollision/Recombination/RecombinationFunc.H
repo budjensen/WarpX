@@ -83,12 +83,14 @@ public:
             GetParticlePosition<PIdx> /*get_position_1*/, GetParticlePosition<PIdx> /*get_position_2*/,
             amrex::ParticleReal const /*n1*/, amrex::ParticleReal const /*n2*/,
             amrex::ParticleReal const /*T1*/, amrex::ParticleReal const /*T2*/,
+            amrex::Real const /*global_lamdb*/,
             amrex::ParticleReal const  /*q1*/, amrex::ParticleReal const  /*q2*/,
             amrex::ParticleReal const  m1, amrex::ParticleReal const  m2,
             amrex::Real const  dt, amrex::Real const dV, index_type coll_idx,
             index_type const /*cell_start_pair*/, index_type* AMREX_RESTRICT /*p_mask*/,
             index_type* AMREX_RESTRICT /*p_pair_indices_1*/, index_type* AMREX_RESTRICT /*p_pair_indices_2*/,
             amrex::ParticleReal* AMREX_RESTRICT /*p_pair_reaction_weight*/,
+            amrex::ParticleReal* AMREX_RESTRICT /*p_product_data*/,
             amrex::RandomEngine const& engine) const
         {
             using namespace amrex::literals;
@@ -146,8 +148,8 @@ public:
                 // Get collision parameters (relative energy and velocity in COM frame)
                 amrex::ParticleReal E_coll_eV, v_coll, lab_to_COM_factor;
                 BinaryCollisionUtils::get_collision_parameters(
-                    u1x[I1[i1]], u1y[I1[i1]], u1z[I1[i1]],
-                    u2x[I2[i2]], u2y[I2[i2]], u2z[I2[i2]],
+                    m1*u1x[I1[i1]], m1*u1y[I1[i1]], m1*u1z[I1[i1]],
+                    m2*u2x[I2[i2]], m2*u2y[I2[i2]], m2*u2z[I2[i2]],
                     m1, m2, E_coll_eV, v_coll, lab_to_COM_factor
                 );
                 const amrex::ParticleReal w_max = amrex::max(w1[I1[i1]], w2[I2[i2]]);
@@ -208,13 +210,16 @@ public:
         }
 
         // These flags must be present for compatibility with BinaryCollision.H
-        static constexpr bool m_computeSpeciesDensities = false;
-        static constexpr bool m_computeSpeciesTemperatures = false;
+        bool m_computeSpeciesDensities = false;
+        bool m_computeSpeciesTemperatures = false;
+        bool m_need_product_data = false;
 
         ScatteringProcess::Executor m_recombination_process;
     };
 
     [[nodiscard]] Executor const& executor () const { return m_exe; }
+
+    bool use_global_debye_length() { return false; }
 
 private:
     amrex::Vector<ScatteringProcess> m_recombination_process;
