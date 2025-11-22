@@ -144,12 +144,13 @@ public:
 #endif
 
                 // Get collision parameters (relative energy and velocity in COM frame)
-                amrex::ParticleReal E_coll_eV, v_coll, lorentz_factor;
+                amrex::ParticleReal E_coll_eV, v_coll, lab_to_COM_factor;
                 BinaryCollisionUtils::get_collision_parameters(
                     u1x[I1[i1]], u1y[I1[i1]], u1z[I1[i1]],
                     u2x[I2[i2]], u2y[I2[i2]], u2z[I2[i2]],
-                    m1, m2, E_coll_eV, v_coll, lorentz_factor
+                    m1, m2, E_coll_eV, v_coll, lab_to_COM_factor
                 );
+                const amrex::ParticleReal w_max = amrex::max(w1[I1[i1]], w2[I2[i2]]);
 
                 // Convert collision energy from Joules to eV for cross section lookup
                 E_coll_eV /= PhysConst::q_e;
@@ -170,13 +171,13 @@ public:
                 // Get cross section at this collision energy
                 const amrex::ParticleReal sigma = m_recombination_process.getCrossSection(E_coll_eV);
 
-                // Calculate the collision probability using DSMC/MCC formula
-                // P = n * sigma * v_rel * dt * multiplier_ratio / V
+                // Calculate the collision probability using
+                // P = n * sigma * v_rel * dt / V
                 // where n is the number density of the species with fewer particles
-                const amrex::ParticleReal n_density = static_cast<amrex::ParticleReal>(min_N) / dV;
-                const amrex::ParticleReal exponent = n_density * sigma * v_coll * dt
-                                                     * static_cast<amrex::ParticleReal>(multiplier_ratio)
-                                                     * lorentz_factor;
+                const amrex::ParticleReal n = static_cast<amrex::ParticleReal>(multiplier_ratio)
+                                                      * w_max / dV;
+                const amrex::ParticleReal exponent = n * sigma * v_coll * dt
+                                                     * lab_to_COM_factor;
 
                 const amrex::ParticleReal probability = -std::expm1(-exponent);
 
