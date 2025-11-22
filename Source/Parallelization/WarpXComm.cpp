@@ -53,6 +53,69 @@
 using namespace amrex;
 using warpx::fields::FieldType;
 
+namespace
+{
+    /**
+     * \brief This function is called if \c warpx.do_current_centering = 1 and
+     * it centers the currents from a nodal grid to a staggered grid (Yee) using
+     * finite-order interpolation based on the Fornberg coefficients.
+     *
+     * \param[in,out] dst destination \c MultiFab where the results of the finite-order centering are stored
+     * \param[in] src source \c MultiFab that contains the values of the nodal current to be centered
+     * \param[in] cc_nox order of finite-order centering of currents, along x
+     * \param[in] cc_noy order of finite-order centering of currents, along y
+     * \param[in] cc_noz order of finite-order centering of currents, along z
+     * \param[in] device_current_centering_stencil_coeffs_x stencil coefficients for finite-order centering of currents, along x
+     * \param[in] device_current_centering_stencil_coeffs_y stencil coefficients for finite-order centering of currents, along y
+     * \param[in] device_current_centering_stencil_coeffs_z stencil coefficients for finite-order centering of currents, along z
+     */
+    void UpdateCurrentNodalToStag (
+        amrex::MultiFab& dst, const amrex::MultiFab& src,
+        const int cc_nox, const int cc_noy, const int cc_noz,
+        const amrex::Gpu::DeviceVector<amrex::Real>& device_current_centering_stencil_coeffs_x,
+        const amrex::Gpu::DeviceVector<amrex::Real>& device_current_centering_stencil_coeffs_y,
+        const amrex::Gpu::DeviceVector<amrex::Real>& device_current_centering_stencil_coeffs_z)
+    {
+        // If source and destination MultiFabs have the same index type, a simple copy is enough
+        // (for example, this happens with the current along y in 2D, which is always fully nodal)
+        if (dst.ixType() == src.ixType())
+        {
+            amrex::MultiFab::Copy(dst, src, 0, 0, dst.nComp(), dst.nGrowVect());
+            return;
+        }
+
+        amrex::IntVect const& dst_stag = dst.ixType().toIntVect();
+
+        // Source MultiFab always has nodal index type when this function is called
+        amrex::IntVect const& src_stag = amrex::IntVect::TheNodeVector();
+
+#ifdef AMREX_USE_OMP
+    #pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(dst, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            // Loop over full box including ghost cells
+            // (input arrays will be padded with zeros beyond ghost cells
+            // for out-of-bound accesses due to large-stencil operations)
+            const Box bx = mfi.growntilebox();
+
+            amrex::Array4<amrex::Real const> const& src_arr = src.const_array(mfi);
+            amrex::Array4<amrex::Real>       const& dst_arr = dst.array(mfi);
+
+            // Device vectors of stencil coefficients used for finite-order centering of currents
+            amrex::Real const * stencil_coeffs_x = device_current_centering_stencil_coeffs_x.data();
+            amrex::Real const * stencil_coeffs_y = device_current_centering_stencil_coeffs_y.data();
+            amrex::Real const * stencil_coeffs_z = device_current_centering_stencil_coeffs_z.data();
+
+            amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int j, int k, int l) noexcept
+            {
+                warpx_interp(j, k, l, dst_arr, src_arr, dst_stag, src_stag, cc_nox, cc_noy, cc_noz,
+                             stencil_coeffs_x, stencil_coeffs_y, stencil_coeffs_z);
+            });
+        }
+    }
+}
+
 void
 WarpX::UpdateAuxilaryData ()
 {
@@ -73,18 +136,36 @@ WarpX::UpdateAuxilaryData ()
     // When loading particle fields from file: add the external fields:
     for (int lev = 0; lev <= finest_level; ++lev) {
         if (mypc->m_E_ext_particle_s == "read_from_file") {
+
+            // Scale the field read from file (E_ext) by a scalar time dependency and add it to Efield_aux
+
+            const amrex::ParticleReal time_factor = mypc->m_Efield_time_partparser(t_new[lev]);
+
             ablastr::fields::VectorField Efield_aux = m_fields.get_alldirs(FieldType::Efield_aux, lev);
             const auto& E_ext_lev = m_fields.get_alldirs(FieldType::E_external_particle_field, lev);
-            amrex::MultiFab::Add(*Efield_aux[0], *E_ext_lev[0], 0, 0, E_ext_lev[0]->nComp(), guard_cells.ng_FieldGather);
-            amrex::MultiFab::Add(*Efield_aux[1], *E_ext_lev[1], 0, 0, E_ext_lev[1]->nComp(), guard_cells.ng_FieldGather);
-            amrex::MultiFab::Add(*Efield_aux[2], *E_ext_lev[2], 0, 0, E_ext_lev[2]->nComp(), guard_cells.ng_FieldGather);
+
+            amrex::Saxpy(*Efield_aux[0], time_factor, *E_ext_lev[0], 0, 0, E_ext_lev[0]->nComp(),
+                 guard_cells.ng_FieldGather);
+            amrex::Saxpy(*Efield_aux[1], time_factor, *E_ext_lev[1], 0, 0, E_ext_lev[1]->nComp(),
+                 guard_cells.ng_FieldGather);
+            amrex::Saxpy(*Efield_aux[2], time_factor, *E_ext_lev[2], 0, 0, E_ext_lev[2]->nComp(),
+                 guard_cells.ng_FieldGather);
         }
         if (mypc->m_B_ext_particle_s == "read_from_file") {
+
+            // Scale the field read from file (B_ext) by a scalar time dependency and add it to Bfield_aux
+
+            const amrex::ParticleReal time_factor = mypc->m_Bfield_time_partparser(t_new[lev]);
+
             ablastr::fields::VectorField Bfield_aux = m_fields.get_alldirs(FieldType::Bfield_aux, lev);
             const auto& B_ext_lev = m_fields.get_alldirs(FieldType::B_external_particle_field, lev);
-            amrex::MultiFab::Add(*Bfield_aux[0], *B_ext_lev[0], 0, 0, B_ext_lev[0]->nComp(), guard_cells.ng_FieldGather);
-            amrex::MultiFab::Add(*Bfield_aux[1], *B_ext_lev[1], 0, 0, B_ext_lev[1]->nComp(), guard_cells.ng_FieldGather);
-            amrex::MultiFab::Add(*Bfield_aux[2], *B_ext_lev[2], 0, 0, B_ext_lev[2]->nComp(), guard_cells.ng_FieldGather);
+
+            amrex::Saxpy(*Bfield_aux[0], time_factor, *B_ext_lev[0], 0, 0, B_ext_lev[0]->nComp(),
+                 guard_cells.ng_FieldGather);
+            amrex::Saxpy(*Bfield_aux[1], time_factor, *B_ext_lev[1], 0, 0, B_ext_lev[1]->nComp(),
+                 guard_cells.ng_FieldGather);
+            amrex::Saxpy(*Bfield_aux[2], time_factor, *B_ext_lev[2], 0, 0, B_ext_lev[2]->nComp(),
+                 guard_cells.ng_FieldGather);
         }
     }
 
@@ -594,53 +675,6 @@ WarpX::UpdateAuxilaryDataSameType ()
     }
 }
 
-void WarpX::UpdateCurrentNodalToStag (amrex::MultiFab& dst, amrex::MultiFab const& src)
-{
-    // If source and destination MultiFabs have the same index type, a simple copy is enough
-    // (for example, this happens with the current along y in 2D, which is always fully nodal)
-    if (dst.ixType() == src.ixType())
-    {
-        amrex::MultiFab::Copy(dst, src, 0, 0, dst.nComp(), dst.nGrowVect());
-        return;
-    }
-
-    amrex::IntVect const& dst_stag = dst.ixType().toIntVect();
-
-    // Source MultiFab always has nodal index type when this function is called
-    amrex::IntVect const& src_stag = amrex::IntVect::TheNodeVector();
-
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (Gpu::notInLaunchRegion())
-#endif
-
-    for (MFIter mfi(dst, TilingIfNotGPU()); mfi.isValid(); ++mfi)
-    {
-        // Loop over full box including ghost cells
-        // (input arrays will be padded with zeros beyond ghost cells
-        // for out-of-bound accesses due to large-stencil operations)
-        const Box bx = mfi.growntilebox();
-
-        amrex::Array4<amrex::Real const> const& src_arr = src.const_array(mfi);
-        amrex::Array4<amrex::Real>       const& dst_arr = dst.array(mfi);
-
-        // Order of finite-order centering of currents
-        const int cc_nox = WarpX::current_centering_nox;
-        const int cc_noy = WarpX::current_centering_noy;
-        const int cc_noz = WarpX::current_centering_noz;
-
-        // Device vectors of stencil coefficients used for finite-order centering of currents
-        amrex::Real const * stencil_coeffs_x = WarpX::device_current_centering_stencil_coeffs_x.data();
-        amrex::Real const * stencil_coeffs_y = WarpX::device_current_centering_stencil_coeffs_y.data();
-        amrex::Real const * stencil_coeffs_z = WarpX::device_current_centering_stencil_coeffs_z.data();
-
-        amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int j, int k, int l) noexcept
-        {
-            warpx_interp(j, k, l, dst_arr, src_arr, dst_stag, src_stag, cc_nox, cc_noy, cc_noz,
-                         stencil_coeffs_x, stencil_coeffs_y, stencil_coeffs_z);
-        });
-    }
-}
-
 void
 WarpX::FillBoundaryB (IntVect ng, std::optional<bool> nodal_sync)
 {
@@ -744,7 +778,7 @@ WarpX::FillBoundaryE (const int lev, const PatchType patch_type, const amrex::In
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
         if (pml_rz[lev])
         {
-            pml_rz[lev]->FillBoundaryE(m_fields, patch_type, nodal_sync);
+            pml_rz[lev]->FillBoundaryE(m_fields, patch_type, do_single_precision_comms, nodal_sync);
         }
 #endif
     }
@@ -757,7 +791,7 @@ WarpX::FillBoundaryE (const int lev, const PatchType patch_type, const amrex::In
             "Error: in FillBoundaryE, requested more guard cells than allocated");
 
         const amrex::IntVect nghost = (m_safe_guard_cells) ? mf[i]->nGrowVect() : ng;
-        ablastr::utils::communication::FillBoundary(*mf[i], nghost, WarpX::do_single_precision_comms, period, nodal_sync);
+        ablastr::utils::communication::FillBoundary(*mf[i], nghost, do_single_precision_comms, period, nodal_sync);
     }
 }
 
@@ -809,7 +843,7 @@ WarpX::FillBoundaryB (const int lev, const PatchType patch_type, const amrex::In
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
         if (pml_rz[lev])
         {
-            pml_rz[lev]->FillBoundaryB(m_fields, patch_type, nodal_sync);
+            pml_rz[lev]->FillBoundaryB(m_fields, patch_type, do_single_precision_comms, nodal_sync);
         }
 #endif
     }
@@ -822,7 +856,7 @@ WarpX::FillBoundaryB (const int lev, const PatchType patch_type, const amrex::In
             "Error: in FillBoundaryB, requested more guard cells than allocated");
 
         const amrex::IntVect nghost = (m_safe_guard_cells) ? mf[i]->nGrowVect() : ng;
-        ablastr::utils::communication::FillBoundary(*mf[i], nghost, WarpX::do_single_precision_comms, period, nodal_sync);
+        ablastr::utils::communication::FillBoundary(*mf[i], nghost, do_single_precision_comms, period, nodal_sync);
     }
 }
 
@@ -1094,9 +1128,15 @@ WarpX::SyncCurrent (const std::string& current_fp_string)
                                          "warpx.do_current_centering=1 not supported with more than one fine levels");
         for (int lev = 0; lev <= finest_level; lev++)
         {
-            WarpX::UpdateCurrentNodalToStag(*J_fp[lev][Direction{0}], *J_fp_nodal[lev][Direction{0}]);
-            WarpX::UpdateCurrentNodalToStag(*J_fp[lev][Direction{1}], *J_fp_nodal[lev][Direction{1}]);
-            WarpX::UpdateCurrentNodalToStag(*J_fp[lev][Direction{2}], *J_fp_nodal[lev][Direction{2}]);
+            constexpr auto all_dirs = std::array{Direction{0}, Direction{1}, Direction{2}};
+            for (const auto& dir : all_dirs){
+                ::UpdateCurrentNodalToStag(
+                    *J_fp[lev][dir], *J_fp_nodal[lev][dir],
+                    m_current_centering_nox, m_current_centering_noy, m_current_centering_noz,
+                    device_current_centering_stencil_coeffs_x,
+                    device_current_centering_stencil_coeffs_y,
+                    device_current_centering_stencil_coeffs_z);
+            }
         }
     }
 
@@ -1241,6 +1281,23 @@ WarpX::SyncCurrent (const std::string& current_fp_string)
                 ApplyFilterMF(J_fp, lev, idim);
             }
             SumBoundaryJ(J_fp, lev, idim, period);
+        }
+    }
+}
+
+void
+WarpX::SyncMassMatricesPC ()
+{
+    WARPX_PROFILE("WarpX::SyncMassMatricesPC()");
+
+    ablastr::fields::MultiLevelVectorField const& Sigma_fp = m_fields.get_mr_levels_alldirs("MassMatrices_PC", finest_level);
+
+    for (int idim = 0; idim < 3; ++idim)
+    {
+        for (int lev = finest_level; lev >= 0; --lev)
+        {
+            auto const& period = Geom(lev).periodicity();
+            SumBoundaryJ(Sigma_fp, lev, idim, period);
         }
     }
 }
@@ -1406,14 +1463,16 @@ void WarpX::SumBoundaryJ (
     if (do_current_centering)
     {
 #if   defined(WARPX_DIM_1D_Z)
-        ng_depos_J[0] += WarpX::current_centering_noz / 2;
+        ng_depos_J[0] += m_current_centering_noz / 2;
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        ng_depos_J[0] += m_current_centering_nox / 2;
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
-        ng_depos_J[0] += WarpX::current_centering_nox / 2;
-        ng_depos_J[1] += WarpX::current_centering_noz / 2;
+        ng_depos_J[0] += m_current_centering_nox / 2;
+        ng_depos_J[1] += m_current_centering_noz / 2;
 #elif defined(WARPX_DIM_3D)
-        ng_depos_J[0] += WarpX::current_centering_nox / 2;
-        ng_depos_J[1] += WarpX::current_centering_noy / 2;
-        ng_depos_J[2] += WarpX::current_centering_noz / 2;
+        ng_depos_J[0] += m_current_centering_nox / 2;
+        ng_depos_J[1] += m_current_centering_noy / 2;
+        ng_depos_J[2] += m_current_centering_noz / 2;
 #endif
     }
 
@@ -1441,19 +1500,20 @@ void WarpX::SumBoundaryJ (
     }
 }
 
-/* /brief Update the currents of `lev` by adding the currents from particles
-*         that are in the mesh refinement patches at `lev+1`
-*
-* More precisely, apply filter and sum boundaries for the current of:
-* - the fine patch of `lev`
-* - the coarse patch of `lev+1` (same resolution)
-* - the buffer regions of the coarse patch of `lev+1` (i.e. for particules
-* that are within the mesh refinement patch, but do not deposit on the
-* mesh refinement patch because they are too close to the boundary)
-*
-* Then update the fine patch of `lev` by adding the currents for the coarse
-* patch (and buffer region) of `lev+1`
-*/
+/**
+ * \brief Update the currents of `lev` by adding the currents from particles
+ *         that are in the mesh refinement patches at `lev+1`
+ *
+ * More precisely, apply filter and sum boundaries for the current of:
+ * - the fine patch of `lev`
+ * - the coarse patch of `lev+1` (same resolution)
+ * - the buffer regions of the coarse patch of `lev+1` (i.e. for particules
+ * that are within the mesh refinement patch, but do not deposit on the
+ * mesh refinement patch because they are too close to the boundary)
+ *
+ * Then update the fine patch of `lev` by adding the currents for the coarse
+ * patch (and buffer region) of `lev+1`
+ */
 void WarpX::AddCurrentFromFineLevelandSumBoundary (
     const ablastr::fields::MultiLevelVectorField& J_fp,
     const ablastr::fields::MultiLevelVectorField& J_cp,
@@ -1574,19 +1634,20 @@ void WarpX::ApplyFilterandSumBoundaryRho (int /*lev*/, int glev, amrex::MultiFab
     }
 }
 
-/* /brief Update the charge density of `lev` by adding the charge density from particles
-*         that are in the mesh refinement patches at `lev+1`
-*
-* More precisely, apply filter and sum boundaries for the charge density of:
-* - the fine patch of `lev`
-* - the coarse patch of `lev+1` (same resolution)
-* - the buffer regions of the coarse patch of `lev+1` (i.e. for particules
-* that are within the mesh refinement patch, but do not deposit on the
-* mesh refinement patch because they are too close to the boundary)
-*
-* Then update the fine patch of `lev` by adding the charge density for the coarse
-* patch (and buffer region) of `lev+1`
-*/
+/**
+ *  \brief Update the charge density of `lev` by adding the charge density from particles
+ *         that are in the mesh refinement patches at `lev+1`
+ *
+ * More precisely, apply filter and sum boundaries for the charge density of:
+ * - the fine patch of `lev`
+ * - the coarse patch of `lev+1` (same resolution)
+ * - the buffer regions of the coarse patch of `lev+1` (i.e. for particules
+ * that are within the mesh refinement patch, but do not deposit on the
+ * mesh refinement patch because they are too close to the boundary)
+ *
+ * Then update the fine patch of `lev` by adding the charge density for the coarse
+ * patch (and buffer region) of `lev+1`
+ */
 void WarpX::AddRhoFromFineLevelandSumBoundary (
     const ablastr::fields::MultiLevelScalarField& charge_fp,
     const ablastr::fields::MultiLevelScalarField& charge_cp,

@@ -8,4 +8,5 @@ foreach(D IN LISTS WarpX_DIMS)
 endforeach()
 
 add_subdirectory(DSMC)
+add_subdirectory(Bremsstrahlung)
 add_subdirectory(Recombination)
