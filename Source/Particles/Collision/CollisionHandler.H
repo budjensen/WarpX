@@ -28,6 +28,13 @@ public:
     /* Perform all of the collisions */
     void doCollisions (int step, amrex::Real cur_time, amrex::Real dt, MultiParticleContainer* mypc);
 
+    /** Get a collision by name
+     *
+     * @param[in] name the name of the collision to retrieve
+     * @return pointer to the collision, or nullptr if not found
+     */
+    CollisionBase* getCollisionByName(std::string const& name);
+
 private:
 
     amrex::Vector<std::string> collision_names;

@@ -126,5 +126,14 @@ void CollisionHandler::doCollisions ( int step, amrex::Real cur_time, amrex::Rea
             collision->doCollisions(cur_time, dt*ndt, mypc);
         }
     }
+}
 
+CollisionBase* CollisionHandler::getCollisionByName(std::string const& name)
+{
+    for (amrex::Long i = 0; i < collision_names.size(); ++i) {
+        if (collision_names[i] == name) {
+            return allcollisions[i].get();
+        }
+    }
+    return nullptr;
 }
