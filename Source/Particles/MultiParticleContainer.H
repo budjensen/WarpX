@@ -373,6 +373,8 @@ public:
 
     [[nodiscard]] int getSpeciesID (const std::string& product_str) const;
 
+    [[nodiscard]] CollisionHandler* GetCollisionHandler() const {return collisionhandler.get();}
+
     amrex::Vector<std::unique_ptr<WarpXParticleContainer>>::iterator begin() {return allcontainers.begin();}
     amrex::Vector<std::unique_ptr<WarpXParticleContainer>>::iterator end() {return allcontainers.end();}
 

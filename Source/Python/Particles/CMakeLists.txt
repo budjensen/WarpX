@@ -11,6 +11,7 @@ foreach(D IN LISTS WarpX_DIMS)
             ParticleBoundaryBuffer.cpp
             MultiParticleContainer.cpp
             WarpXParticleContainer.cpp
+            Collision.cpp
         )
     endif()
 endforeach()

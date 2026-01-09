@@ -7,6 +7,8 @@
 #include "Python/pyWarpX.H"
 
 #include <Particles/MultiParticleContainer.H>
+#include <Particles/Collision/CollisionHandler.H>
+#include <Particles/Collision/BackgroundMCC/BackgroundMCCCollision.H>
 
 #include <AMReX_GpuContainers.H>
 #include <AMReX_REAL.H>
@@ -48,6 +50,36 @@ strength_E, strength_B: floats
                 return mpc.GetChargeDensity(lev, local);
             },
             py::arg("lev"), py::arg("local")
+        )
+
+        .def("get_collision",
+            [](MultiParticleContainer& mpc, std::string const& collision_name) -> BackgroundMCCCollision* {
+                auto* handler = mpc.GetCollisionHandler();
+                if (handler) {
+                    // Get collision by name from handler
+                    auto* collision = handler->getCollisionByName(collision_name);
+                    if (collision) {
+                        // Try to cast to BackgroundMCCCollision
+                        auto* mcc_collision = dynamic_cast<BackgroundMCCCollision*>(collision);
+                        return mcc_collision;
+                    }
+                }
+                return nullptr;
+            },
+            py::arg("collision_name"),
+            py::return_value_policy::reference_internal,
+            R"doc(Get a collision object by name.
+
+            Parameters
+            ----------
+            collision_name : str
+                Name of the collision (as defined in the input file)
+
+            Returns
+            -------
+            BackgroundMCCCollision or None
+                The collision object, or None if not found or not an MCC collision
+            )doc"
         )
     ;
 }
