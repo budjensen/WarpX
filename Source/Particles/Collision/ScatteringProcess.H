@@ -129,6 +129,7 @@ public:
     [[nodiscard]] amrex::ParticleReal getEnergyInputStep () const { return m_exe_h.m_dE; }
 
     [[nodiscard]] ScatteringProcessType type () const { return m_exe_h.m_type; }
+    [[nodiscard]] std::string const& name () const { return m_name; }
 
 private:
 
@@ -137,6 +138,7 @@ private:
 
     void init (const std::string& scattering_process, amrex::ParticleReal energy);
 
+    std::string m_name;
     amrex::Vector<amrex::ParticleReal> m_energies;
 
 #ifdef AMREX_USE_GPU

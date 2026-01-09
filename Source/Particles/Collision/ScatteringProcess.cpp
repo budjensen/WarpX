@@ -38,6 +38,7 @@ void
 ScatteringProcess::init (const std::string& scattering_process, const amrex::ParticleReal energy)
 {
     using namespace amrex::literals;
+    m_name = scattering_process;
     m_exe_h.m_sigmas_data = m_sigmas_h.data();
 
     // save energy grid parameters for easy use
