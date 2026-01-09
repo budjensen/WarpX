@@ -10,6 +10,7 @@
 #include "Particles/Algorithms/KineticEnergy.H"
 #include "Particles/ParticleCreation/FilterCopyTransform.H"
 #include "Particles/ParticleCreation/SmartCopy.H"
+#include "Particles/Pusher/GetAndSetPosition.H"
 #include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
 #include "Utils/ParticleUtils.H"
@@ -85,6 +86,9 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
     m_background_mass = -1;
     utils::parser::queryWithParser(
         pp_collision_name, "background_mass", m_background_mass);
+
+    // Check if collision tracking is enabled
+    pp_collision_name.query("enable_collision_tracking", m_enable_collision_tracking);
 
     // query for a list of collision processes
     // these could be elastic, excitation, charge_exchange, back, etc.
@@ -288,6 +292,18 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
         init_flag = true;
     }
 
+    // Initialize collision tracking if enabled
+    if (m_enable_collision_tracking && !m_tracking_initialized) {
+        auto const flvl = species1.finestLevel();
+        amrex::Vector<amrex::BoxArray> ba(flvl + 1);
+        amrex::Vector<amrex::DistributionMapping> dm(flvl + 1);
+        for (int lev = 0; lev <= flvl; ++lev) {
+            ba[lev] = species1.ParticleBoxArray(lev);
+            dm[lev] = species1.ParticleDistributionMap(lev);
+        }
+        InitializeCollisionTracking(flvl + 1, ba, dm);
+    }
+
     // Loop over refinement levels
     auto const flvl = species1.finestLevel();
     for (int lev = 0; lev <= flvl; ++lev) {
@@ -364,6 +380,21 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
     amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
 
+    // Get collision tracking array for cell-by-cell tracking
+    const int lev = pti.GetLevel();
+    amrex::Array4<amrex::Real> tracking_arr;
+    bool do_tracking = false;
+    if (m_tracking_initialized && lev < static_cast<int>(m_collision_tracking_mf.size())) {
+        auto& tracking_mf = m_collision_tracking_mf[lev];
+        tracking_arr = tracking_mf->array(pti);
+        do_tracking = true;
+    }
+
+    // Get geometry and box info for cell index calculation
+    const auto& geom = WarpX::GetInstance().Geom(lev);
+    const auto plo = geom.ProbLoArray();
+    const auto dxi = geom.InvCellSizeArray();
+
     amrex::ParallelForRNG(np,
                           [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
                           {
@@ -372,6 +403,12 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
 
                               amrex::ParticleReal x, y, z;
                               GetPosition.AsStored(ip, x, y, z);
+
+                              // Calculate cell indices for this particle
+                              int i = 0, j = 0, k = 0;
+                              if (do_tracking) {
+                                  getCellIndices(x, y, z, plo, dxi, i, j, k);
+                              }
 
                               const amrex::ParticleReal n_a = n_a_func(x, y, z, t);
                               const amrex::ParticleReal T_a = T_a_func(x, y, z, t);
@@ -403,9 +440,13 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                               // calculate the collision energy in eV
                               ParticleUtils::getCollisionEnergy(v_coll2, m, M, gamma, E_coll);
 
+                              // Store initial kinetic energy for tracking
+                              const double E_initial = (do_tracking) ?
+                                  Algorithms::KineticEnergy<double>(ux[ip], uy[ip], uz[ip], m) : 0.0;
+
                               // loop through all collision pathways
-                              for (int i = 0; i < process_count; i++) {
-                                  auto const& scattering_process = *(scattering_processes + i);
+                              for (int iproc = 0; iproc < process_count; iproc++) {
+                                  auto const& scattering_process = *(scattering_processes + iproc);
 
                                   // get collision cross-section
                                   sigma_E = scattering_process.getCrossSection(static_cast<amrex::ParticleReal>(E_coll));
@@ -424,6 +465,15 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                       ux[ip] = ua_x;
                                       uy[ip] = ua_y;
                                       uz[ip] = ua_z;
+
+                                      // Track collision (interleaved: count at 2*iproc, energy at 2*iproc+1)
+                                      if (do_tracking) {
+                                          const double E_final = Algorithms::KineticEnergy<double>(ua_x, ua_y, ua_z, m);
+                                          const double E_transfer = E_initial - E_final;
+                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), 1.0_prt);
+                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc + 1),
+                                              static_cast<amrex::Real>(E_transfer));
+                                      }
                                       break;
                                   }
 
@@ -451,6 +501,15 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                       ux[ip] = vx;
                                       uy[ip] = vy;
                                       uz[ip] = vz;
+
+                                      // Track collision (interleaved: count at 2*iproc, energy at 2*iproc+1)
+                                      if (do_tracking) {
+                                          const double E_final = Algorithms::KineticEnergy<double>(vx, vy, vz, m);
+                                          const double E_transfer = E_initial - E_final;
+                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), 1.0_prt);
+                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc + 1),
+                                              static_cast<amrex::Real>(E_transfer));
+                                      }
                                       break;
                                   }
 
@@ -477,6 +536,16 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                   ux[ip] = vx + ua_x;
                                   uy[ip] = vy + ua_y;
                                   uz[ip] = vz + ua_z;
+
+                                  // Track collision (interleaved: count at 2*iproc, energy at 2*iproc+1)
+                                  if (do_tracking) {
+                                      const double E_final = Algorithms::KineticEnergy<double>(
+                                          vx + ua_x, vy + ua_y, vz + ua_z, m);
+                                      const double E_transfer = E_initial - E_final;
+                                      amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), 1.0_prt);
+                                      amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc + 1),
+                                          static_cast<amrex::Real>(E_transfer));
+                                  }
                                   break;
                               }
                           }
@@ -503,6 +572,21 @@ void BackgroundMCCCollision::doBackgroundIonization
 
     const amrex::ParticleReal sqrt_kb_m = std::sqrt(PhysConst::kb / m_background_mass);
 
+    // Get tracking array for ionization if enabled
+    amrex::Array4<amrex::Real> tracking_arr;
+    bool do_tracking = false;
+    if (m_tracking_initialized && lev < static_cast<int>(m_collision_tracking_mf.size())) {
+        do_tracking = true;
+    }
+
+    // Get geometry for cell index calculation
+    const auto& geom = WarpX::GetInstance().Geom(lev);
+    const auto plo = geom.ProbLoArray();
+    const auto dxi = geom.InvCellSizeArray();
+
+    // Get ionization process index (it's after all scattering processes)
+    const int ionization_comp_idx = static_cast<int>(m_scattering_processes.size());
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -513,6 +597,12 @@ void BackgroundMCCCollision::doBackgroundIonization
             amrex::Gpu::synchronize();
         }
         auto wt = static_cast<amrex::Real>(amrex::second());
+
+        // Get tracking array for this tile
+        if (do_tracking) {
+            auto& tracking_mf = m_collision_tracking_mf[lev];
+            tracking_arr = tracking_mf->array(pti);
+        }
 
         auto& elec_tile = species1.ParticlesAt(lev, pti);
         auto& ion_tile = species2.ParticlesAt(lev, pti);
@@ -530,6 +620,66 @@ void BackgroundMCCCollision::doBackgroundIonization
                                                                Filter, CopyElec, CopyIon, Transform
                                                                );
 
+        // Track ionization collisions
+        if (do_tracking && num_added > 0) {
+            // For ionization tracking, we need to go through the particles that ionized
+            // This is approximate - we track based on the particles that were created
+            auto& soa_elec = elec_tile.GetStructOfArrays();
+
+            // Access the particle data arrays directly (dimension-dependent for positions)
+#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
+            const amrex::ParticleReal* AMREX_RESTRICT pos_x = soa_elec.GetRealData(PIdx::x).data();
+#endif
+#if defined(WARPX_DIM_3D)
+            const amrex::ParticleReal* AMREX_RESTRICT pos_y = soa_elec.GetRealData(PIdx::y).data();
+#endif
+#if defined(WARPX_ZINDEX)
+            const amrex::ParticleReal* AMREX_RESTRICT pos_z = soa_elec.GetRealData(PIdx::z).data();
+#endif
+            const amrex::ParticleReal* AMREX_RESTRICT ux_arr = soa_elec.GetRealData(PIdx::ux).data();
+            const amrex::ParticleReal* AMREX_RESTRICT uy_arr = soa_elec.GetRealData(PIdx::uy).data();
+            const amrex::ParticleReal* AMREX_RESTRICT uz_arr = soa_elec.GetRealData(PIdx::uz).data();
+
+            // Track each newly created electron
+            amrex::ParallelFor(num_added, [=] AMREX_GPU_DEVICE (int ip) {
+                const int idx = np_elec + ip;
+
+                // Get particle position
+#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
+                const amrex::ParticleReal x = pos_x[idx];
+#else
+                const amrex::ParticleReal x = 0.0;
+#endif
+#if defined(WARPX_DIM_3D)
+                const amrex::ParticleReal y = pos_y[idx];
+#else
+                const amrex::ParticleReal y = 0.0;
+#endif
+#if defined(WARPX_ZINDEX)
+                const amrex::ParticleReal z = pos_z[idx];
+#else
+                const amrex::ParticleReal z = 0.0;
+#endif
+
+                // Calculate cell indices
+                int ii = 0, jj = 0, kk = 0;
+                getCellIndices(x, y, z, plo, dxi, ii, jj, kk);
+
+                // Get the energy of the created electron (approximate energy transfer)
+                const amrex::ParticleReal ux = ux_arr[idx];
+                const amrex::ParticleReal uy = uy_arr[idx];
+                const amrex::ParticleReal uz = uz_arr[idx];
+                const double E_electron = Algorithms::KineticEnergy<double>(ux, uy, uz, m_mass1);
+                // Energy transfer is approximately the ionization energy + created electron energy
+                const double E_transfer = m_ionization_processes[0].getEnergyPenalty() * PhysConst::q_e + E_electron;
+
+                // Track collision count and energy transfer (interleaved: count at 2*idx, energy at 2*idx+1)
+                amrex::HostDevice::Atomic::Add(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx), 1.0_prt);
+                amrex::HostDevice::Atomic::Add(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx + 1),
+                    static_cast<amrex::Real>(E_transfer));
+            });
+        }
+
         setNewParticleIDs(elec_tile, np_elec, num_added);
         setNewParticleIDs(ion_tile, np_ion, num_added);
 
@@ -539,5 +689,113 @@ void BackgroundMCCCollision::doBackgroundIonization
             wt = static_cast<amrex::Real>(amrex::second()) - wt;
             amrex::HostDevice::Atomic::Add( &(*cost)[pti.index()], wt);
         }
+    }
+}
+
+void BackgroundMCCCollision::InitializeCollisionTracking(
+    int nlevs,
+    amrex::Vector<amrex::BoxArray> const& ba,
+    amrex::Vector<amrex::DistributionMapping> const& dm)
+{
+    if (m_tracking_initialized) {
+        return;  // Already initialized
+    }
+
+    const int ncomps = getNumTrackingComponents();
+    if (ncomps == 0) {
+        return;  // No scattering processes to track
+    }
+
+    m_collision_tracking_mf.resize(nlevs);
+    for (int lev = 0; lev < nlevs; ++lev) {
+        m_collision_tracking_mf[lev] = std::make_unique<amrex::MultiFab>(
+            ba[lev], dm[lev], ncomps, 0);
+        m_collision_tracking_mf[lev]->setVal(0.0);
+    }
+
+    m_tracking_initialized = true;
+}
+
+amrex::MultiFab* BackgroundMCCCollision::getCollisionTracking(int lev)
+{
+    if (!m_tracking_initialized || lev >= static_cast<int>(m_collision_tracking_mf.size())) {
+        return nullptr;
+    }
+    return m_collision_tracking_mf[lev].get();
+}
+
+void BackgroundMCCCollision::resetCollisionTracking(int lev)
+{
+    if (m_tracking_initialized && lev < static_cast<int>(m_collision_tracking_mf.size())) {
+        m_collision_tracking_mf[lev]->setVal(0.0);
+    }
+}
+
+amrex::Vector<std::string> BackgroundMCCCollision::getProcessNames() const
+{
+    amrex::Vector<std::string> names;
+    for (const auto& process : m_scattering_processes) {
+        names.push_back(process.name());
+    }
+    for (const auto& process : m_ionization_processes) {
+        names.push_back(process.name());
+    }
+    return names;
+}
+
+void BackgroundMCCCollision::gatherCollisionTracking(int lev, amrex::Vector<amrex::Real>& data,
+                                                     amrex::Box& box, int ngrow)
+{
+    data.clear();
+    box = amrex::Box();
+
+    if (!m_tracking_initialized || lev >= static_cast<int>(m_collision_tracking_mf.size())) {
+        return;
+    }
+
+    auto* mf = m_collision_tracking_mf[lev].get();
+    if (mf == nullptr) {
+        return;
+    }
+
+    const int ncomp = getNumTrackingComponents();
+    const int ioproc = amrex::ParallelDescriptor::IOProcessorNumber();
+
+    // Get the domain box for this level
+    const auto& geom = WarpX::GetInstance().Geom(lev);
+    amrex::Box domain = geom.Domain();
+    if (ngrow > 0) {
+        domain.grow(ngrow);
+    }
+
+    // Create a single-box BoxArray and DistributionMapping on IO processor
+    amrex::BoxArray ba_single(domain);
+    amrex::DistributionMapping dm_single;
+    amrex::Vector<int> pmap(1, ioproc);
+    dm_single.define(std::move(pmap));
+
+    // Create a MultiFab on the IO processor to gather data into
+    amrex::MultiFab mf_gathered(ba_single, dm_single, ncomp, 0);
+    mf_gathered.setVal(0.0);
+
+    // Copy from the distributed MultiFab to the gathered one
+    mf_gathered.ParallelCopy(*mf, 0, 0, ncomp);
+
+    // Only IO processor extracts the data
+    if (amrex::ParallelDescriptor::IOProcessor()) {
+        box = domain;
+        const amrex::Long ncells = domain.numPts();
+        data.resize(ncells * ncomp);
+
+        const amrex::Array4<const amrex::Real> arr = mf_gathered.array(0);
+        amrex::Long idx = 0;
+
+        // Iterate through the box in standard order and pack data
+        amrex::LoopOnCpu(domain, [&](int i, int j, int k) {
+            for (int comp = 0; comp < ncomp; ++comp) {
+                data[idx * ncomp + comp] = arr(i, j, k, comp);
+            }
+            idx++;
+        });
     }
 }
