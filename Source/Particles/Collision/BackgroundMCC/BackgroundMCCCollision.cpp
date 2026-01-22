@@ -645,6 +645,10 @@ void BackgroundMCCCollision::doBackgroundIonization
             const amrex::ParticleReal* AMREX_RESTRICT uy_arr = soa_elec.GetRealData(PIdx::uy).data();
             const amrex::ParticleReal* AMREX_RESTRICT uz_arr = soa_elec.GetRealData(PIdx::uz).data();
 
+            // Store particle mass and energy penalty for device access
+            auto const m = m_mass1;
+            auto const energy_penalty = m_ionization_processes[0].getEnergyPenalty();
+
             // Track each newly created electron
             amrex::ParallelFor(num_added, [=] AMREX_GPU_DEVICE (int ip) {
                 const int idx = np_elec + ip;
@@ -675,9 +679,9 @@ void BackgroundMCCCollision::doBackgroundIonization
                 const amrex::ParticleReal ux = ux_arr[idx];
                 const amrex::ParticleReal uy = uy_arr[idx];
                 const amrex::ParticleReal uz = uz_arr[idx];
-                const double E_electron = Algorithms::KineticEnergy<double>(ux, uy, uz, m_mass1);
+                const double E_electron = Algorithms::KineticEnergy<double>(ux, uy, uz, m);
                 // Energy transfer is approximately the ionization energy + created electron energy
-                const double E_transfer = m_ionization_processes[0].getEnergyPenalty() * PhysConst::q_e + E_electron;
+                const double E_transfer = energy_penalty * PhysConst::q_e + E_electron;
 
                 // Track collision count and energy transfer (interleaved: count at 2*idx, energy at 2*idx+1)
                 amrex::HostDevice::Atomic::Add(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx), weight);
