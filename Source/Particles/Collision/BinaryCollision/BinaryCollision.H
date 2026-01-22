@@ -15,6 +15,7 @@
 #include "Particles/Collision/BinaryCollision/LinearBreitWheeler/LinearBreitWheelerCollisionFunc.H"
 #include "Particles/Collision/BinaryCollision/LinearCompton/LinearComptonCollisionFunc.H"
 #include "Particles/Collision/BinaryCollision/ParticleCreationFunc.H"
+#include "Particles/Collision/BinaryCollision/Recombination/RecombinationFunc.H"
 #include "Particles/Collision/BinaryCollision/ShuffleFisherYates.H"
 #include "Particles/Collision/CollisionBase.H"
 #include "Particles/ParticleCreation/SmartCopy.H"
@@ -166,6 +167,10 @@ public:
     BinaryCollision ( BinaryCollision&& )                  = delete;
     BinaryCollision& operator= ( BinaryCollision&& )       = delete;
 
+    /** Get reference to the collision functor (for accessing tracking methods) */
+    CollisionFunctor& getCollisionFunctor() { return m_binary_collision_functor; }
+    CollisionFunctor const& getCollisionFunctor() const { return m_binary_collision_functor; }
+
     /** Perform the collisions
      *
      * @param cur_time Current time
@@ -179,6 +184,11 @@ public:
 
         auto& species1 = mypc->GetParticleContainerFromName(m_species_names[0]);
         auto& species2 = mypc->GetParticleContainerFromName(m_species_names[1]);
+
+        // Initialize tracking if enabled (for RecombinationFunc)
+        if constexpr (std::is_same_v<CollisionFunctor, RecombinationFunc>) {
+            initializeRecombinationTracking(species1);
+        }
 
         // In case of particle creation, create the necessary vectors
         const int n_product_species = m_product_species.size();
@@ -287,6 +297,26 @@ public:
 
         const auto& binary_collision_functor = m_binary_collision_functor.executor();
         const bool have_product_species = m_have_product_species;
+
+        // Set up tracking array if needed (only for RecombinationFunc)
+        if constexpr (std::is_same_v<CollisionFunctor, RecombinationFunc>) {
+            auto& binary_collision_functor_non_const = const_cast<CollisionFunctor&>(m_binary_collision_functor);
+            auto& executor_non_const = const_cast<typename CollisionFunctor::Executor&>(binary_collision_functor_non_const.executor());
+
+            if (binary_collision_functor_non_const.getCollisionTracking(lev) != nullptr) {
+                amrex::MultiFab* tracking_mf = binary_collision_functor_non_const.getCollisionTracking(lev);
+                executor_non_const.m_tracking_arr = tracking_mf->array(mfi);
+
+                // Set up geometry information for cell index calculation
+                amrex::Geometry const& geom = WarpX::GetInstance().Geom(lev);
+                const auto plo = geom.ProbLoArray();
+                const auto dx_inv = geom.InvCellSizeArray();
+                for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+                    executor_non_const.m_plo[idim] = plo[idim];
+                    executor_non_const.m_dxi[idim] = dx_inv[idim];
+                }
+            }
+        }
 
         // Store product species data in vectors
         const int n_product_species = m_product_species.size();
@@ -1467,6 +1497,30 @@ public:
     }
 
 private:
+
+    /** Helper to initialize recombination tracking
+     *
+     * @param species1 First species container (used to get grid info)
+     */
+    void initializeRecombinationTracking(WarpXParticleContainer& species1)
+    {
+        // Only applies to RecombinationFunc - use if constexpr to prevent compilation for other types
+        if constexpr (std::is_same_v<CollisionFunctor, RecombinationFunc>) {
+            // Check if already initialized
+            auto* mf = m_binary_collision_functor.getCollisionTracking(0);
+            if (mf != nullptr) {
+                return;  // Already initialized
+            }
+
+            // Initialize for all levels
+            auto const flvl = species1.finestLevel();
+            for (int lev = 0; lev <= flvl; ++lev) {
+                const auto& ba = species1.ParticleBoxArray(lev);
+                const auto& dm = species1.ParticleDistributionMap(lev);
+                m_binary_collision_functor.initializeTracking(lev, ba, dm);
+            }
+        }
+    }
 
     bool m_isSameSpecies;
     bool m_have_product_species;
