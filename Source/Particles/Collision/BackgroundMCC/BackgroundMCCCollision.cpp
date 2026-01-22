@@ -376,6 +376,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
 
     // get Struct-Of-Array particle data, also called attribs
     auto& attribs = pti.GetAttribs();
+    amrex::ParticleReal* const AMREX_RESTRICT w = attribs[PIdx::w].dataPtr();
     amrex::ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
     amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
     amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
@@ -470,9 +471,10 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                       if (do_tracking) {
                                           const double E_final = Algorithms::KineticEnergy<double>(ua_x, ua_y, ua_z, m);
                                           const double E_transfer = E_initial - E_final;
-                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), 1.0_prt);
+                                          const auto weight = static_cast<amrex::Real>(w[ip]);
+                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), weight);
                                           amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc + 1),
-                                              static_cast<amrex::Real>(E_transfer));
+                                              weight * static_cast<amrex::Real>(E_transfer));
                                       }
                                       break;
                                   }
@@ -506,9 +508,10 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                       if (do_tracking) {
                                           const double E_final = Algorithms::KineticEnergy<double>(vx, vy, vz, m);
                                           const double E_transfer = E_initial - E_final;
-                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), 1.0_prt);
+                                          const auto weight = static_cast<amrex::Real>(w[ip]);
+                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), weight);
                                           amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc + 1),
-                                              static_cast<amrex::Real>(E_transfer));
+                                              weight * static_cast<amrex::Real>(E_transfer));
                                       }
                                       break;
                                   }
@@ -542,9 +545,10 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                       const double E_final = Algorithms::KineticEnergy<double>(
                                           vx + ua_x, vy + ua_y, vz + ua_z, m);
                                       const double E_transfer = E_initial - E_final;
-                                      amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), 1.0_prt);
+                                      const auto weight = static_cast<amrex::Real>(w[ip]);
+                                      amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), weight);
                                       amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc + 1),
-                                          static_cast<amrex::Real>(E_transfer));
+                                          weight * static_cast<amrex::Real>(E_transfer));
                                   }
                                   break;
                               }
@@ -636,6 +640,7 @@ void BackgroundMCCCollision::doBackgroundIonization
 #if defined(WARPX_ZINDEX)
             const amrex::ParticleReal* AMREX_RESTRICT pos_z = soa_elec.GetRealData(PIdx::z).data();
 #endif
+            const amrex::ParticleReal* AMREX_RESTRICT w_arr = soa_elec.GetRealData(PIdx::w).data();
             const amrex::ParticleReal* AMREX_RESTRICT ux_arr = soa_elec.GetRealData(PIdx::ux).data();
             const amrex::ParticleReal* AMREX_RESTRICT uy_arr = soa_elec.GetRealData(PIdx::uy).data();
             const amrex::ParticleReal* AMREX_RESTRICT uz_arr = soa_elec.GetRealData(PIdx::uz).data();
@@ -665,7 +670,8 @@ void BackgroundMCCCollision::doBackgroundIonization
                 int ii = 0, jj = 0, kk = 0;
                 getCellIndices(x, y, z, plo, dxi, ii, jj, kk);
 
-                // Get the energy of the created electron (approximate energy transfer)
+                // Get the particle weight and energy of the created electron (approximate energy transfer)
+                const amrex::Real weight = static_cast<amrex::Real>(w_arr[idx]);
                 const amrex::ParticleReal ux = ux_arr[idx];
                 const amrex::ParticleReal uy = uy_arr[idx];
                 const amrex::ParticleReal uz = uz_arr[idx];
@@ -674,9 +680,9 @@ void BackgroundMCCCollision::doBackgroundIonization
                 const double E_transfer = m_ionization_processes[0].getEnergyPenalty() * PhysConst::q_e + E_electron;
 
                 // Track collision count and energy transfer (interleaved: count at 2*idx, energy at 2*idx+1)
-                amrex::HostDevice::Atomic::Add(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx), 1.0_prt);
+                amrex::HostDevice::Atomic::Add(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx), weight);
                 amrex::HostDevice::Atomic::Add(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx + 1),
-                    static_cast<amrex::Real>(E_transfer));
+                    weight * static_cast<amrex::Real>(E_transfer));
             });
         }
 
