@@ -50,7 +50,7 @@ public:
      */
     RecombinationFunc ( const std::string& collision_name,
                         MultiParticleContainer const * mypc,
-                        bool isSameSpecies );
+                        bool /*isSameSpecies*/ );
 
     struct Executor {
         /**
@@ -68,6 +68,7 @@ public:
          * @param[in] I1e,I2e is the stop index for I1,I2 (exclusive).
          * @param[in] I1,I2 index arrays. They determine all elements that will be used.
          * @param[in] soa_1,soa_2 contain the struct of array data of the two species
+         * @param[in] m1,m2 the mass of the two species
          * @param[in] dt is the time step length between two collision calls.
          * @param[in] dV is the volume of the corresponding cell.
          * @param[in] coll_idx is the collision index offset.
@@ -87,10 +88,10 @@ public:
             amrex::ParticleReal const  /*q1*/, amrex::ParticleReal const  /*q2*/,
             amrex::ParticleReal const  m1, amrex::ParticleReal const  m2,
             amrex::Real const  dt, amrex::Real const dV, index_type coll_idx,
-            index_type const /*cell_start_pair*/, index_type* AMREX_RESTRICT /*p_mask*/,
-            index_type* AMREX_RESTRICT /*p_pair_indices_1*/, index_type* AMREX_RESTRICT /*p_pair_indices_2*/,
-            amrex::ParticleReal* AMREX_RESTRICT /*p_pair_reaction_weight*/,
-            amrex::ParticleReal* AMREX_RESTRICT /*p_product_data*/,
+            index_type const /*cell_start_pair*/, index_type* /*p_mask*/,
+            index_type* /*p_pair_indices_1*/, index_type* /*p_pair_indices_2*/,
+            amrex::ParticleReal* /*p_pair_reaction_weight*/,
+            amrex::ParticleReal* /*p_product_data*/,
             amrex::RandomEngine const& engine) const
         {
             using namespace amrex::literals;
