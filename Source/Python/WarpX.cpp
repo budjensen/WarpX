@@ -28,6 +28,8 @@
 #include <Filter/NCIGodfreyFilter.H>
 #include <Initialization/ExternalField.H>
 #include <Particles/MultiParticleContainer.H>
+#include <Particles/Collision/CollisionHandler.H>
+#include <Particles/Collision/BackgroundMCC/BackgroundMCCCollision.H>
 #include <Fluids/MultiFluidContainer.H>
 #include <Fluids/WarpXFluidContainer.H>
 #include <Particles/ParticleBoundaryBuffer.H>
@@ -189,6 +191,34 @@ The physical fields in WarpX have the following naming:
         .def("get_particle_boundary_buffer",
             [](WarpX& wx){ return &wx.GetParticleBoundaryBuffer(); },
             py::return_value_policy::reference_internal
+        )
+        .def("get_collision",
+            [](WarpX& wx, std::string const& collision_name) -> BackgroundMCCCollision* {
+                auto& mpc = wx.GetPartContainer();
+                auto* handler = mpc.GetCollisionHandler();
+                if (handler) {
+                    auto* collision = handler->getCollisionByName(collision_name);
+                    if (collision) {
+                        auto* mcc_collision = dynamic_cast<BackgroundMCCCollision*>(collision);
+                        return mcc_collision;
+                    }
+                }
+                return nullptr;
+            },
+            py::arg("collision_name"),
+            py::return_value_policy::reference_internal,
+            R"doc(Get a collision object by name.
+
+            Parameters
+            ----------
+            collision_name : str
+                Name of the collision (as defined in the input file)
+
+            Returns
+            -------
+            BackgroundMCCCollision or None
+                The collision object, or None if not found or not an MCC collision
+            )doc"
         )
 
         // Expose functions used to sync the charge density multifab

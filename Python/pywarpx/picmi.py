@@ -2643,6 +2643,10 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
 
     ndt: integer, optional
         The collisions will be applied every "ndt" steps. Must be 1 or larger.
+
+    enable_collision_tracking: bool, optional
+        Whether to enable tracking of collision counts and energy transfer per cell for each process.
+        Default is False.
     """
 
     def __init__(
@@ -2655,6 +2659,7 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         background_mass=None,
         max_background_density=None,
         ndt=None,
+        enable_collision_tracking=False,
         **kw,
     ):
         self.name = name
@@ -2665,6 +2670,7 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         self.scattering_processes = scattering_processes
         self.max_background_density = max_background_density
         self.ndt = ndt
+        self.enable_collision_tracking = enable_collision_tracking
 
         self.handle_init(kw)
 
@@ -2687,6 +2693,7 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         collision.background_mass = self.background_mass
         collision.max_background_density = self.max_background_density
         collision.ndt = self.ndt
+        collision.enable_collision_tracking = self.enable_collision_tracking
 
         collision.scattering_processes = self.scattering_processes.keys()
         for process, kw in self.scattering_processes.items():
