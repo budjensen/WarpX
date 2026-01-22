@@ -2779,14 +2779,28 @@ class RecombinationCollisions(picmistandard.base._ClassWithInit):
 
     ndt: integer, optional
         The collisions will be applied every "ndt" steps. Must be 1 or larger.
+
+    enable_collision_tracking: bool, optional
+        Whether to enable tracking of collision counts and energy transfer per cell for each process.
+        Default is False.
     """
 
-    def __init__(self, name, species, cross_section, max_energy, ndt=None, **kw):
+    def __init__(
+        self,
+        name,
+        species,
+        cross_section,
+        max_energy,
+        ndt=None,
+        enable_collision_tracking=False,
+        **kw,
+    ):
         self.name = name
         self.species = species
         self.cross_section = cross_section
         self.max_energy = max_energy
         self.ndt = ndt
+        self.enable_collision_tracking = enable_collision_tracking
 
         self.handle_init(kw)
 
@@ -2798,6 +2812,7 @@ class RecombinationCollisions(picmistandard.base._ClassWithInit):
 
         collision.cross_section = self.cross_section
         collision.max_energy = self.max_energy
+        collision.enable_collision_tracking = self.enable_collision_tracking
 
 
 class EmbeddedBoundary(picmistandard.base._ClassWithInit):

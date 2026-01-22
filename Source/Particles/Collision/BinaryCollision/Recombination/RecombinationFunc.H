@@ -216,6 +216,12 @@ public:
         bool m_need_product_data = false;
 
         ScatteringProcess::Executor m_recombination_process;
+
+        // Tracking data
+        amrex::Array4<amrex::Real> m_tracking_arr;
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_plo;
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_dxi;
+        bool m_do_tracking = false;
     };
 
     [[nodiscard]] Executor const& executor () const { return m_exe; }
@@ -227,6 +233,43 @@ private:
     amrex::Gpu::DeviceVector<ScatteringProcess::Executor> m_recombination_process_exe;
 
     Executor m_exe;
+
+    // Collision tracking data
+    bool m_do_tracking = false;
+    bool m_tracking_initialized = false;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_tracking_data;
+
+    /**
+     * \brief Calculate cell indices from particle position
+     *
+     * \param[in] x, y, z particle coordinates
+     * \param[in] plo lower corner of problem domain
+     * \param[in] dxi inverse cell size array
+     * \param[out] i, j, k cell indices
+     */
+    static AMREX_GPU_HOST_DEVICE AMREX_INLINE
+    void getCellIndices(
+        amrex::ParticleReal x, amrex::ParticleReal y, amrex::ParticleReal z,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& plo,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& dxi,
+        int& i, int& j, int& k)
+    {
+#if defined(WARPX_DIM_1D_Z)
+        amrex::ignore_unused(x, y);
+        i = static_cast<int>((z - plo[0]) * dxi[0]);
+        j = 0;
+        k = 0;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+        amrex::ignore_unused(y);
+        i = static_cast<int>((x - plo[0]) * dxi[0]);
+        j = 0;
+        k = static_cast<int>((z - plo[1]) * dxi[1]);
+#elif defined(WARPX_DIM_3D)
+        i = static_cast<int>((x - plo[0]) * dxi[0]);
+        j = static_cast<int>((y - plo[1]) * dxi[1]);
+        k = static_cast<int>((z - plo[2]) * dxi[2]);
+#endif
+    }
 };
 
 #endif // WARPX_RECOMBINATION_FUNC_H_

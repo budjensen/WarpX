@@ -29,6 +29,9 @@ RecombinationFunc::RecombinationFunc (
     amrex::ParticleReal energy = 0._prt;
     pp_collision_name.query("max_energy", energy);
 
+    // Check if collision tracking is enabled
+    pp_collision_name.query("enable_collision_tracking", m_do_tracking);
+
     // Create the scattering process for recombination
     // We use a generic "recombination" process type which will be treated as absorption
     m_recombination_process.emplace_back("recombination", cross_section_file, energy);
