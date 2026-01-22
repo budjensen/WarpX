@@ -364,17 +364,17 @@ class CollisionBufferWrapper(object):
             collision_name, level=level, copy_to_host=True, energy_units=energy_units
         )
 
-        if data is None:
-            print(
-                f"Warning: No tracking data available for collision '{collision_name}'"
-            )
-            return
-
-        # Ensure .npz extension
-        if not filename.endswith(".npz"):
-            filename += ".npz"
-
         if rank == 0:
+            if data is None:
+                print(
+                    f"Warning: No tracking data available for collision '{collision_name}'"
+                )
+                return
+
+            # Ensure .npz extension
+            if not filename.endswith(".npz"):
+                filename += ".npz"
+
             # Build save dictionary with process names as keys and (counts, energy) tuples as values
             save_dict = {
                 "collision_name": collision_name,
