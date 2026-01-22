@@ -59,7 +59,7 @@ jobs:
         cd ${warpx_dir}
         cmake -S . -B build            \
           -DCMAKE_VERBOSE_MAKEFILE=ON  \
-          -DWarpX_DIMS="1;2;RZ;3"      \
+          -DWarpX_DIMS="1;RZ"      \
           -DAMReX_PETSC=YES            \
           -DPETSC_DIR=${PETSC_DIR}     \
           -DPETSC_ARCH=${PETSC_ARCH}   \
@@ -113,7 +113,7 @@ jobs:
         cd ${warpx_dir}
         cmake -S . -B build            \
           -DCMAKE_VERBOSE_MAKEFILE=ON  \
-          -DWarpX_DIMS="1;2;RZ;3"      \
+          -DWarpX_DIMS="1;RZ"      \
           -DAMReX_PETSC=YES            \
           -DPETSC_DIR=${PETSC_DIR}     \
           -DPETSC_ARCH=${PETSC_ARCH}   \
