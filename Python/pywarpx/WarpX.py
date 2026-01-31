@@ -20,6 +20,7 @@ from .Diagnostics import diagnostics, reduced_diagnostics
 from .EB2 import eb2
 from .Geometry import geometry
 from .HybridPICModel import external_vector_potential, hybridpicmodel
+from .ICPHeating import icp_heating
 from .Interpolation import interpolation
 from .Lasers import lasers, lasers_list
 from .Particles import particles, particles_list
@@ -50,6 +51,7 @@ class WarpX(Bucket):
         argv += geometry.attrlist()
         argv += hybridpicmodel.attrlist()
         argv += external_vector_potential.attrlist()
+        argv += icp_heating.attrlist()
         argv += boundary.attrlist()
         argv += algo.attrlist()
         argv += interpolation.attrlist()

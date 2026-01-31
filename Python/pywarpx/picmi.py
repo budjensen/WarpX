@@ -2990,6 +2990,101 @@ class PlasmaLens(picmistandard.base._ClassWithInit):
         pywarpx.particles.repeated_plasma_lens_strengths_B = self.strengths_B
 
 
+class ICPHeating(picmistandard.base._ClassWithInit):
+    """
+    Quasi-inductive (ICP-like) heating model for electrostatic PIC simulations.
+
+    This class implements a prescribed transverse current density that drives
+    heating in a specified spatial region. The model is suitable for 1D
+    electrostatic simulations only.
+
+    Parameters
+    ----------
+    frequency : float
+        Driving frequency in Hz (e.g., 13.56e6 for typical ICP).
+
+    z_min, z_max : float
+        Axial bounds of the heating region in meters.
+
+    j0_amplitude : float or str
+        Current density amplitude J_0(z,t):
+        - float: constant amplitude (A/m^2)
+        - str: mathematical expression as function of (z,t) for parser
+              Example: "100.0 * exp(-(z-0.005)^2/0.001^2)"
+
+    ey_max : float, optional
+        Maximum allowed transverse electric field amplitude in V/m.
+        Acts as a stability limiter (default: 1e6 V/m).
+
+    Examples
+    --------
+    Basic constant current amplitude:
+
+    >>> from pywarpx import picmi
+    >>> icp = picmi.ICPHeating(
+    ...     frequency=13.56e6,
+    ...     z_min=0.0,
+    ...     z_max=0.005,
+    ...     j0_amplitude=100.0,  # A/m^2
+    ... )
+    >>> sim.add_icp_heating(icp)
+
+    Spatially varying current using parser expression:
+
+    >>> icp = picmi.ICPHeating(
+    ...     frequency=13.56e6,
+    ...     z_min=0.0,
+    ...     z_max=0.01,
+    ...     j0_amplitude="100.0 * exp(-(z-0.005)^2 / 0.001^2)",
+    ... )
+    >>> sim.add_icp_heating(icp)
+
+    Time-varying current amplitude:
+
+    >>> icp = picmi.ICPHeating(
+    ...     frequency=13.56e6,
+    ...     z_min=0.0,
+    ...     z_max=0.005,
+    ...     j0_amplitude="100.0 * (1 + 0.1*sin(2*pi*1e6*t))",
+    ... )
+    >>> sim.add_icp_heating(icp)
+    """
+
+    def __init__(self, frequency, z_min, z_max, j0_amplitude, ey_max=1e6, **kw):
+        self.frequency = frequency
+        self.z_min = z_min
+        self.z_max = z_max
+        self.j0_amplitude = j0_amplitude
+        self.ey_max = ey_max
+
+        # Validate inputs
+        if self.frequency <= 0:
+            raise ValueError("frequency must be positive")
+        if self.z_max <= self.z_min:
+            raise ValueError("z_max must be greater than z_min")
+
+        self.handle_init(kw)
+
+    def icp_heating_initialize_inputs(self):
+        """
+        Initialize WarpX input parameters for the ICP heating model.
+
+        This method is called automatically by the Simulation object during
+        initialize_inputs(). Sets up the C++ backend configuration.
+        """
+        pywarpx.icp_heating.do_heating = True
+        pywarpx.icp_heating.frequency = self.frequency
+        pywarpx.icp_heating.z_min = self.z_min
+        pywarpx.icp_heating.z_max = self.z_max
+        pywarpx.icp_heating.ey_max = self.ey_max
+
+        # Set j0 amplitude (can be float or string expression)
+        if isinstance(self.j0_amplitude, str):
+            pywarpx.icp_heating.__setattr__("j0_amplitude(z,t)", self.j0_amplitude)
+        else:
+            pywarpx.icp_heating.j0_amplitude = float(self.j0_amplitude)
+
+
 class Simulation(picmistandard.PICMI_Simulation):
     """
     See `Input Parameters <https://warpx.readthedocs.io/en/latest/usage/parameters.html>`__ for more information.
@@ -3261,6 +3356,7 @@ class Simulation(picmistandard.PICMI_Simulation):
         self.self_fields_max_iters = kw.pop("warpx_self_fields_max_iters", None)
         self.self_fields_verbosity = kw.pop("warpx_self_fields_verbosity", None)
 
+        self.icp_heating_models = []
         self.inputs_initialized = False
         self.warpx_initialized = False
 
@@ -3417,6 +3513,9 @@ class Simulation(picmistandard.PICMI_Simulation):
         for diagnostic in self.diagnostics:
             diagnostic.diagnostic_initialize_inputs()
 
+        for icp_heating_model in self.icp_heating_models:
+            icp_heating_model.icp_heating_initialize_inputs()
+
         if self.amr_restart:
             pywarpx.amr.restart = self.amr_restart
 
@@ -3441,6 +3540,17 @@ class Simulation(picmistandard.PICMI_Simulation):
         pywarpx.warpx.write_inputs(
             file_name, max_step=self.max_steps, stop_time=self.max_time
         )
+
+    def add_icp_heating(self, icp_heating):
+        """
+        Add ICP heating model to the simulation.
+
+        Parameters
+        ----------
+        icp_heating : ICPHeating
+            ICP heating model instance to add
+        """
+        self.icp_heating_models.append(icp_heating)
 
     def step(self, nsteps=None, mpi_comm=None):
         self.initialize_inputs()
