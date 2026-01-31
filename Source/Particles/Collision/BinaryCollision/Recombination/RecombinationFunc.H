@@ -1,6 +1,7 @@
 #ifndef WARPX_RECOMBINATION_FUNC_H_
 #define WARPX_RECOMBINATION_FUNC_H_
 
+#include "Particles/Algorithms/KineticEnergy.H"
 #include "Particles/Collision/BinaryCollision/BinaryCollisionUtils.H"
 #include "Particles/Collision/CollisionBase.H"
 #include "Particles/Collision/ScatteringProcess.H"
@@ -15,6 +16,10 @@
 #include <AMReX_ParmParse.H>
 #include <AMReX_Random.H>
 #include <AMReX_REAL.H>
+#include <AMReX_MultiFab.H>
+#include <AMReX_Box.H>
+#include <AMReX_BoxArray.H>
+#include <AMReX_DistributionMapping.H>
 
 /**
  * \brief This class performs recombination collisions within a cell.
@@ -191,6 +196,43 @@ public:
                     // Use the minimum weight to ensure both particles can be removed
                     const amrex::ParticleReal reaction_weight = amrex::min(w1[I1[i1]], w2[I2[i2]]);
 
+                    // Track collision if enabled
+                    if (m_do_tracking) {
+                        // Get particle 1 position for cell index calculation
+                        amrex::ParticleReal x, y, z;
+#if defined(WARPX_DIM_1D_Z)
+                        z = soa_1.m_rdata[PIdx::z][I1[i1]];
+                        x = 0.0; y = 0.0;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                        x = soa_1.m_rdata[PIdx::x][I1[i1]];
+                        z = soa_1.m_rdata[PIdx::z][I1[i1]];
+                        y = 0.0;
+#elif defined(WARPX_DIM_3D)
+                        x = soa_1.m_rdata[PIdx::x][I1[i1]];
+                        y = soa_1.m_rdata[PIdx::y][I1[i1]];
+                        z = soa_1.m_rdata[PIdx::z][I1[i1]];
+#endif
+
+                        // Calculate cell indices
+                        int cell_i = 0, cell_j = 0, cell_k = 0;
+                        RecombinationFunc::getCellIndices(x, y, z, m_plo, m_dxi, cell_i, cell_j, cell_k);
+
+                        // Update collision count (component 0)
+                        amrex::Gpu::Atomic::AddNoRet(&m_tracking_arr(cell_i, cell_j, cell_k, 0),
+                                                     reaction_weight);
+
+                        // Update energy transfer (component 1)
+                        // Energy transferred = sum of lab-frame kinetic energies of both particles
+                        const amrex::ParticleReal KE1 = Algorithms::KineticEnergy(
+                            u1x[I1[i1]], u1y[I1[i1]], u1z[I1[i1]], m1);
+                        const amrex::ParticleReal KE2 = Algorithms::KineticEnergy(
+                            u2x[I2[i2]], u2y[I2[i2]], u2z[I2[i2]], m2);
+                        const amrex::ParticleReal total_energy_lab = KE1 + KE2;
+
+                        amrex::Gpu::Atomic::AddNoRet(&m_tracking_arr(cell_i, cell_j, cell_k, 1),
+                                                     reaction_weight * total_energy_lab);
+                    }
+
                     BinaryCollisionUtils::remove_weight_from_colliding_particle(
                         w1[I1[i1]], idcpu1[I1[i1]], reaction_weight);
                     BinaryCollisionUtils::remove_weight_from_colliding_particle(
@@ -216,17 +258,106 @@ public:
         bool m_need_product_data = false;
 
         ScatteringProcess::Executor m_recombination_process;
+
+        // Tracking data
+        amrex::Array4<amrex::Real> m_tracking_arr;
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_plo;
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_dxi;
+        bool m_do_tracking = false;
     };
 
     [[nodiscard]] Executor const& executor () const { return m_exe; }
 
     bool use_global_debye_length() { return false; }
 
+    /** Initialize collision tracking multifabs
+     *
+     * @param[in] lev refinement level
+     * @param[in] ba BoxArray for the level
+     * @param[in] dm DistributionMapping for the level
+     */
+    void initializeTracking(int lev, amrex::BoxArray const& ba,
+                           amrex::DistributionMapping const& dm);
+
+    /** Get collision tracking multifab for a given level
+     *
+     * @param[in] lev refinement level
+     * @return pointer to the collision tracking multifab
+     */
+    amrex::MultiFab* getCollisionTracking(int lev);
+
+    /** Reset collision tracking data (zero all cells) for a given level
+     *
+     * @param[in] lev refinement level
+     */
+    void resetCollisionTracking(int lev);
+
+    /** Get the number of tracking components (2 per process)
+     *
+     * @return number of components in tracking multifab
+     */
+    [[nodiscard]] int getNumTrackingComponents() const {
+        return 2; // count and energy for single recombination process
+    }
+
+    /** Get the names of processes for tracking
+     *
+     * @return vector of process names
+     */
+    [[nodiscard]] amrex::Vector<std::string> getProcessNames() const;
+
+    /** Gather collision tracking data from all boxes into a single spatial array
+     *
+     * @param[in] lev refinement level
+     * @param[out] data output vector containing the gathered spatial data
+     * @param[out] box output Box describing the index space of the gathered data
+     * @param[in] ngrow number of grow cells to include (default=0)
+     */
+    void gatherCollisionTracking(int lev, amrex::Vector<amrex::Real>& data,
+                                amrex::Box& box, int ngrow=0);
+
 private:
     amrex::Vector<ScatteringProcess> m_recombination_process;
     amrex::Gpu::DeviceVector<ScatteringProcess::Executor> m_recombination_process_exe;
 
     Executor m_exe;
+
+    // Collision tracking data
+    bool m_do_tracking = false;
+    bool m_tracking_initialized = false;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_tracking_data;
+
+    /**
+     * \brief Calculate cell indices from particle position
+     *
+     * \param[in] x, y, z particle coordinates
+     * \param[in] plo lower corner of problem domain
+     * \param[in] dxi inverse cell size array
+     * \param[out] i, j, k cell indices
+     */
+    static AMREX_GPU_HOST_DEVICE AMREX_INLINE
+    void getCellIndices(
+        amrex::ParticleReal x, amrex::ParticleReal y, amrex::ParticleReal z,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& plo,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& dxi,
+        int& i, int& j, int& k)
+    {
+#if defined(WARPX_DIM_1D_Z)
+        amrex::ignore_unused(x, y);
+        i = static_cast<int>((z - plo[0]) * dxi[0]);
+        j = 0;
+        k = 0;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+        amrex::ignore_unused(y);
+        i = static_cast<int>((x - plo[0]) * dxi[0]);
+        j = 0;
+        k = static_cast<int>((z - plo[1]) * dxi[1]);
+#elif defined(WARPX_DIM_3D)
+        i = static_cast<int>((x - plo[0]) * dxi[0]);
+        j = static_cast<int>((y - plo[1]) * dxi[1]);
+        k = static_cast<int>((z - plo[2]) * dxi[2]);
+#endif
+    }
 };
 
 #endif // WARPX_RECOMBINATION_FUNC_H_

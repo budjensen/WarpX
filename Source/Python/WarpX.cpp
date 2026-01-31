@@ -30,6 +30,9 @@
 #include <Particles/MultiParticleContainer.H>
 #include <Particles/Collision/CollisionHandler.H>
 #include <Particles/Collision/BackgroundMCC/BackgroundMCCCollision.H>
+#include <Particles/Collision/BinaryCollision/BinaryCollision.H>
+#include <Particles/Collision/BinaryCollision/Recombination/RecombinationFunc.H>
+#include <Particles/Collision/BinaryCollision/ParticleCreationFunc.H>
 #include <Fluids/MultiFluidContainer.H>
 #include <Fluids/WarpXFluidContainer.H>
 #include <Particles/ParticleBoundaryBuffer.H>
@@ -193,20 +196,33 @@ The physical fields in WarpX have the following naming:
             py::return_value_policy::reference_internal
         )
         .def("get_collision",
-            [](WarpX& wx, std::string const& collision_name) -> BackgroundMCCCollision* {
+            [](WarpX& wx, std::string const& collision_name) -> py::object {
                 auto& mpc = wx.GetPartContainer();
                 auto* handler = mpc.GetCollisionHandler();
-                if (handler) {
-                    auto* collision = handler->getCollisionByName(collision_name);
-                    if (collision) {
-                        auto* mcc_collision = dynamic_cast<BackgroundMCCCollision*>(collision);
-                        return mcc_collision;
-                    }
+                if (!handler) {
+                    return py::none();
                 }
-                return nullptr;
+
+                auto* collision = handler->getCollisionByName(collision_name);
+                if (!collision) {
+                    return py::none();
+                }
+
+                // Try to cast to BackgroundMCCCollision first
+                if (auto* mcc_collision = dynamic_cast<BackgroundMCCCollision*>(collision)) {
+                    return py::cast(mcc_collision, py::return_value_policy::reference);
+                }
+
+                // Try to cast to RecombinationCollision
+                using RecombinationCollision = BinaryCollision<RecombinationFunc, NoParticleCreationFunc>;
+                if (auto* recom_collision = dynamic_cast<RecombinationCollision*>(collision)) {
+                    return py::cast(recom_collision, py::return_value_policy::reference);
+                }
+
+                // Unknown collision type
+                return py::none();
             },
             py::arg("collision_name"),
-            py::return_value_policy::reference_internal,
             R"doc(Get a collision object by name.
 
             Parameters
@@ -216,8 +232,8 @@ The physical fields in WarpX have the following naming:
 
             Returns
             -------
-            BackgroundMCCCollision or None
-                The collision object, or None if not found or not an MCC collision
+            BackgroundMCCCollision or RecombinationCollision or None
+                The collision object, or None if not found or type not supported for tracking
             )doc"
         )
 

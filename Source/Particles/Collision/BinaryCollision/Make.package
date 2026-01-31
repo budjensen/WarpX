@@ -3,5 +3,6 @@ CEXE_sources += ParticleCreationFunc.cpp
 
 include $(WARPX_HOME)/Source/Particles/Collision/BinaryCollision/DSMC/Make.package
 include $(WARPX_HOME)/Source/Particles/Collision/BinaryCollision/Bremsstrahlung/Make.package
+include $(WARPX_HOME)/Source/Particles/Collision/BinaryCollision/Recombination/Make.package
 
 VPATH_LOCATIONS   += $(WARPX_HOME)/Source/Particles/Collision/BinaryCollision
