@@ -1,0 +1,4 @@
+CEXE_sources += ICPHeatingModel.cpp
+
+VPATH_LOCATIONS   += $(WARPX_HOME)/Source/FieldSolver/InductiveHeating
+INCLUDE_LOCATIONS += $(WARPX_HOME)/Source/FieldSolver/InductiveHeating

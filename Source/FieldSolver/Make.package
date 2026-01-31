@@ -10,5 +10,6 @@ include $(WARPX_HOME)/Source/FieldSolver/ElectrostaticSolvers/Make.package
 include $(WARPX_HOME)/Source/FieldSolver/FiniteDifferenceSolver/Make.package
 include $(WARPX_HOME)/Source/FieldSolver/MagnetostaticSolver/Make.package
 include $(WARPX_HOME)/Source/FieldSolver/ImplicitSolvers/Make.package
+include $(WARPX_HOME)/Source/FieldSolver/InductiveHeating/Make.package
 
 VPATH_LOCATIONS   += $(WARPX_HOME)/Source/FieldSolver
