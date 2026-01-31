@@ -25,6 +25,7 @@
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "FieldSolver/FiniteDifferenceSolver/MacroscopicProperties/MacroscopicProperties.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+#include "FieldSolver/InductiveHeating/ICPHeatingModel.H"
 #ifdef WARPX_USE_FFT
 #   include "FieldSolver/SpectralSolver/SpectralKSpace.H"
 #   ifdef WARPX_DIM_RZ
@@ -413,6 +414,13 @@ WarpX::WarpX ()
     {
         // Create hybrid-PIC model object if needed
         m_hybrid_pic_model = std::make_unique<HybridPICModel>();
+    }
+
+    // Create ICP heating model for electrostatic simulations
+    // Note: Always created for ES mode, but only active if do_heating=1 in input file
+    if (WarpX::electrostatic_solver_id != ElectrostaticSolverAlgo::None)
+    {
+        m_icp_heating_model = std::make_unique<ICPHeatingModel>();
     }
 
     current_buffer_masks.resize(nlevs_max);
@@ -2506,6 +2514,14 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
             lev, ba, dm, ncomps, ngJ, ngRho, ngEB, jx_nodal_flag, jy_nodal_flag,
             jz_nodal_flag, rho_nodal_flag, Ex_nodal_flag, Ey_nodal_flag, Ez_nodal_flag,
             Bx_nodal_flag, By_nodal_flag, Bz_nodal_flag
+        );
+    }
+
+    // Allocate extra multifabs needed for ICP heating in electrostatic simulations
+    if (m_icp_heating_model && m_icp_heating_model->is_enabled())
+    {
+        m_icp_heating_model->AllocateLevelMFs(
+            m_fields, lev, ba, dm, ngJ
         );
     }
 
