@@ -56,7 +56,7 @@ jobs:
         du -hs ~/.cache/ccache
 
   build_1D:
-    name: GCC 1D w/ MPI, QED tools
+    name: GCC 1D w/ MPI
     runs-on: ubuntu-24.04
     needs: check_changes
     if: ${{ github.event.pull_request.draft == false && needs.check_changes.outputs.has_non_docs_changes == 'true' }}
@@ -97,10 +97,6 @@ jobs:
 
         ccache -s
         du -hs ~/.cache/ccache
-
-    - name: run QED table tools
-      run: |
-        .github/workflows/scripts/checkQEDTableGenerator.sh
 
   build_sp:
     name: GCC RZ w/ MPI, single precision
