@@ -219,7 +219,7 @@ public:
 
                         // Update collision count (component 0)
                         amrex::Gpu::Atomic::AddNoRet(&m_tracking_arr(cell_i, cell_j, cell_k, 0),
-                                                     reaction_weight);
+                                                     static_cast<amrex::Real>(reaction_weight));
 
                         // Update energy transfer (component 1)
                         // Energy transferred = sum of lab-frame kinetic energies of both particles
@@ -230,7 +230,7 @@ public:
                         const amrex::ParticleReal total_energy_lab = KE1 + KE2;
 
                         amrex::Gpu::Atomic::AddNoRet(&m_tracking_arr(cell_i, cell_j, cell_k, 1),
-                                                     reaction_weight * total_energy_lab);
+                                                     static_cast<amrex::Real>(reaction_weight * total_energy_lab));
                     }
 
                     BinaryCollisionUtils::remove_weight_from_colliding_particle(

@@ -472,8 +472,8 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                           const double E_final = Algorithms::KineticEnergy<double>(ua_x, ua_y, ua_z, m);
                                           const double E_transfer = E_initial - E_final;
                                           const auto weight = static_cast<amrex::Real>(w[ip]);
-                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), weight);
-                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc + 1),
+                                          amrex::Gpu::Atomic::AddNoRet(&tracking_arr(i, j, k, 2*iproc), weight);
+                                          amrex::Gpu::Atomic::AddNoRet(&tracking_arr(i, j, k, 2*iproc + 1),
                                               weight * static_cast<amrex::Real>(E_transfer));
                                       }
                                       break;
@@ -509,8 +509,8 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                           const double E_final = Algorithms::KineticEnergy<double>(vx, vy, vz, m);
                                           const double E_transfer = E_initial - E_final;
                                           const auto weight = static_cast<amrex::Real>(w[ip]);
-                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), weight);
-                                          amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc + 1),
+                                          amrex::Gpu::Atomic::AddNoRet(&tracking_arr(i, j, k, 2*iproc), weight);
+                                          amrex::Gpu::Atomic::AddNoRet(&tracking_arr(i, j, k, 2*iproc + 1),
                                               weight * static_cast<amrex::Real>(E_transfer));
                                       }
                                       break;
@@ -546,8 +546,8 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                           vx + ua_x, vy + ua_y, vz + ua_z, m);
                                       const double E_transfer = E_initial - E_final;
                                       const auto weight = static_cast<amrex::Real>(w[ip]);
-                                      amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc), weight);
-                                      amrex::HostDevice::Atomic::Add(&tracking_arr(i, j, k, 2*iproc + 1),
+                                      amrex::Gpu::Atomic::AddNoRet(&tracking_arr(i, j, k, 2*iproc), weight);
+                                      amrex::Gpu::Atomic::AddNoRet(&tracking_arr(i, j, k, 2*iproc + 1),
                                           weight * static_cast<amrex::Real>(E_transfer));
                                   }
                                   break;
@@ -684,8 +684,8 @@ void BackgroundMCCCollision::doBackgroundIonization
                 const double E_transfer = energy_penalty * PhysConst::q_e + E_electron;
 
                 // Track collision count and energy transfer (interleaved: count at 2*idx, energy at 2*idx+1)
-                amrex::HostDevice::Atomic::Add(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx), weight);
-                amrex::HostDevice::Atomic::Add(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx + 1),
+                amrex::Gpu::Atomic::AddNoRet(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx), weight);
+                amrex::Gpu::Atomic::AddNoRet(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx + 1),
                     weight * static_cast<amrex::Real>(E_transfer));
             });
         }
