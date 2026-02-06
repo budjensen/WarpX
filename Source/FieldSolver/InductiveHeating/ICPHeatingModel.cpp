@@ -245,7 +245,7 @@ void ICPHeatingModel::UpdateTransverseElectricField(
                 Jy_target_arr(i, j, k) = J_target;
 
                 // Update E_y using Ampere's law
-                const Real dJ = Jy_cond_arr(i, j, k) - J_target;
+                const Real dJ = J_target - Jy_cond_arr(i, j, k);
                 Real Ey_new = Ey_arr(i, j, k) + dt_over_eps0 * dJ;
 
                 // Apply field limiter
