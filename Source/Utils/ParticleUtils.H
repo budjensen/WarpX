@@ -66,6 +66,43 @@ namespace ParticleUtils {
     }
 
     /**
+     * \brief Return (nonrelativistic) collision energy assuming the target (with
+     * mass M) is stationary and the projectile is approaching with the
+     * the given speed and mass m. Note the use of `double` since this
+     * calculation is prone to error with single precision.
+     *
+     * @param[in] u2 square of particle speed
+     * @param[in] m, M mass of projectile and target, respectively
+     * @param[out] energy particle energy in eV
+     */
+    AMREX_GPU_HOST_DEVICE AMREX_INLINE
+    void getNonrelativisticCollisionEnergy ( amrex::ParticleReal const u2, double const m,
+                                             double const M, double& energy )
+    {
+        using namespace amrex::literals;
+
+        energy = 0.5_rt * m * M * u2 / (M + m) / PhysConst::q_e;
+    }
+
+    /**
+     * \brief Perform a Galilean transformation of the given velocity
+     * to a frame moving with velocity (Vx, Vy, Vz) relative to the present one.
+     *
+     * @param[in,out] ux,uy,uz components of velocity vector in the current frame
+     * @param[in] Vx,Vy,Vz velocity of the new frame relative to the current one
+     */
+    AMREX_GPU_HOST_DEVICE AMREX_INLINE
+    void doGalileanTransform ( amrex::ParticleReal& ux, amrex::ParticleReal& uy,
+                               amrex::ParticleReal& uz,
+                               amrex::ParticleReal const Vx, amrex::ParticleReal const Vy,
+                               amrex::ParticleReal const Vz )
+    {
+        ux -= Vx;
+        uy -= Vy;
+        uz -= Vz;
+    }
+
+    /**
      * \brief Perform a Lorentz transformation of the given velocity
      * to a frame moving with velocity (Vx, Vy, Vz) relative to the present one.
      *

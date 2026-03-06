@@ -96,7 +96,7 @@ public:
 
         // calculate kinetic energy
         constexpr auto eV = PhysConst::q_e;
-        E_coll = Algorithms::KineticEnergy<double>(ux, uy, uz, m_mass)/eV;
+        E_coll = Algorithms::NonrelativisticKineticEnergy<double>(ux, uy, uz, m_mass)/eV;
 
         // get collision cross-section
         const ParticleReal sigma_E = m_mcc_process.getCrossSection(static_cast<amrex::ParticleReal>(E_coll));
@@ -201,16 +201,12 @@ public:
 
         // calculate kinetic energy
         constexpr auto eV = PhysConst::q_e;
-        E_coll = Algorithms::KineticEnergy<double>(ux, uy, uz, m_mass1)/eV;
+        E_coll = Algorithms::NonrelativisticKineticEnergy<double>(ux, uy, uz, m_mass1)/eV;
 
         // each electron gets half the energy (could change this later)
         const auto E_out = static_cast<amrex::ParticleReal>((E_coll - m_energy_cost) / 2.0_prt * eV);
 
-        // precalculate often used value
-        constexpr auto c2 = PhysConst::c * PhysConst::c;
-        const auto mc2 = m_mass1*c2;
-
-        const amrex::ParticleReal up = sqrt(E_out * (E_out + 2.0_prt*mc2) / c2) / m_mass1;
+        const amrex::ParticleReal up = sqrt(2.0_prt * E_out / m_mass1);
 
         // isotropically scatter electrons
         ParticleUtils::RandomizeVelocity(ux, uy, uz, up, engine);

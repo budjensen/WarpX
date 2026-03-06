@@ -50,6 +50,29 @@ namespace Algorithms{
     }
 
     /**
+     * \brief Computes the kinetic energy of a nonrelativistic particle.
+     * This method should not be used with photons.
+     *
+     * @tparam T floating-point type to be used in internal calculations (by default equal to amrex::ParticleReal)
+     * @param[in] ux x component of the particle momentum (code units)
+     * @param[in] uy y component of the particle momentum (code units)
+     * @param[in] uz z component of the particle momentum (code units)
+     * @param[in] mass mass of the particle (in S.I. units)
+     *
+     * @return the kinetic energy of the particle (in S.I. units)
+     */
+    template <typename T = amrex::ParticleReal>
+    AMREX_GPU_HOST_DEVICE AMREX_INLINE
+    T NonrelativisticKineticEnergy(
+        const amrex::ParticleReal ux, const amrex::ParticleReal uy, const amrex::ParticleReal uz, const amrex::ParticleReal mass)
+    {
+        using namespace amrex;
+
+        const auto u2 = static_cast<T>(ux*ux + uy*uy + uz*uz);
+        return static_cast<T>(0.5) * static_cast<T>(mass) * u2;
+    }
+
+    /**
      * \brief Computes the kinetic energy of a photon.
      *
      * @param[in] ux x component of the particle momentum (code units)

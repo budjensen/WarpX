@@ -366,10 +366,6 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     auto const m = m_mass1;
     auto const M = m_background_mass;
 
-    // precalculate often used value
-    constexpr auto c2 = PhysConst::c * PhysConst::c;
-    auto const mc2 = m*c2;
-
     // we need particle positions in order to calculate the local density
     // and temperature
     auto GetPosition = GetParticlePosition<PIdx>(pti);
@@ -415,7 +411,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                               const amrex::ParticleReal T_a = T_a_func(x, y, z, t);
 
                               amrex::ParticleReal v_coll, v_coll2, sigma_E, nu_i = 0;
-                              double gamma, E_coll;
+                              double E_coll;
                               amrex::ParticleReal ua_x, ua_y, ua_z, vx, vy, vz;
                               amrex::ParticleReal uCOM_x, uCOM_y, uCOM_z;
                               const amrex::ParticleReal col_select = amrex::Random(engine);
@@ -439,11 +435,11 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                               v_coll = std::sqrt(v_coll2);
 
                               // calculate the collision energy in eV
-                              ParticleUtils::getCollisionEnergy(v_coll2, m, M, gamma, E_coll);
+                              ParticleUtils::getNonrelativisticCollisionEnergy(v_coll2, m, M, E_coll);
 
                               // Store initial kinetic energy for tracking
                               const double E_initial = (do_tracking) ?
-                                  Algorithms::KineticEnergy<double>(ux[ip], uy[ip], uz[ip], m) : 0.0;
+                                  Algorithms::NonrelativisticKineticEnergy<double>(ux[ip], uy[ip], uz[ip], m) : 0.0;
 
                               // loop through all collision pathways
                               for (int iproc = 0; iproc < process_count; iproc++) {
@@ -469,7 +465,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
 
                                       // Track collision (interleaved: count at 2*iproc, energy at 2*iproc+1)
                                       if (do_tracking) {
-                                          const double E_final = Algorithms::KineticEnergy<double>(ua_x, ua_y, ua_z, m);
+                                          const double E_final = Algorithms::NonrelativisticKineticEnergy<double>(ua_x, ua_y, ua_z, m);
                                           const double E_transfer = E_initial - E_final;
                                           const auto weight = static_cast<amrex::Real>(w[ip]);
                                           amrex::Gpu::Atomic::AddNoRet(&tracking_arr(i, j, k, 2*iproc), weight);
@@ -482,23 +478,23 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                   // At this point the given particle has been chosen for a collision
                                   // and so we perform the needed calculations to transform to the
                                   // COM frame.
-                                  uCOM_x = static_cast<amrex::ParticleReal>(m * vx / (gamma * m + M));
-                                  uCOM_y = static_cast<amrex::ParticleReal>(m * vy / (gamma * m + M));
-                                  uCOM_z = static_cast<amrex::ParticleReal>(m * vz / (gamma * m + M));
+                                  uCOM_x = static_cast<amrex::ParticleReal>(m * vx / (m + M));
+                                  uCOM_y = static_cast<amrex::ParticleReal>(m * vy / (m + M));
+                                  uCOM_z = static_cast<amrex::ParticleReal>(m * vz / (m + M));
 
                                   // subtract any energy penalty of the collision from the
                                   // projectile energy
                                   if (scattering_process.m_energy_penalty > 0.0_prt) {
                                       constexpr auto eV = PhysConst::q_e;
-                                      E_coll = (Algorithms::KineticEnergy<double>(vx, vy, vz, m) - scattering_process.m_energy_penalty*eV);
+                                      E_coll = (Algorithms::NonrelativisticKineticEnergy<double>(vx, vy, vz, m) - scattering_process.m_energy_penalty*eV);
                                       const auto scale_fac = static_cast<amrex::ParticleReal>(
-                                        std::sqrt(E_coll * (E_coll + 2.0_prt*mc2) / c2) / m / v_coll);
+                                        std::sqrt(2.0_prt * E_coll / m) / v_coll);
                                       vx *= scale_fac;
                                       vy *= scale_fac;
                                       vz *= scale_fac;
                                   }
 
-                                  // Skip Lorentz transformations when projectile does not scatter
+                                  // Early exit when projectile does not scatter
                                   if (scattering_process.m_type == ScatteringProcessType::FORWARD) {
                                       ux[ip] = vx;
                                       uy[ip] = vy;
@@ -506,7 +502,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
 
                                       // Track collision (interleaved: count at 2*iproc, energy at 2*iproc+1)
                                       if (do_tracking) {
-                                          const double E_final = Algorithms::KineticEnergy<double>(vx, vy, vz, m);
+                                          const double E_final = Algorithms::NonrelativisticKineticEnergy<double>(vx, vy, vz, m);
                                           const double E_transfer = E_initial - E_final;
                                           const auto weight = static_cast<amrex::Real>(w[ip]);
                                           amrex::Gpu::Atomic::AddNoRet(&tracking_arr(i, j, k, 2*iproc), weight);
@@ -517,7 +513,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                   }
 
                                   // transform to COM frame
-                                  ParticleUtils::doLorentzTransform(vx, vy, vz, uCOM_x, uCOM_y, uCOM_z);
+                                  ParticleUtils::doGalileanTransform(vx, vy, vz, uCOM_x, uCOM_y, uCOM_z);
 
                                   if ((scattering_process.m_type == ScatteringProcessType::ELASTIC)
                                       || (scattering_process.m_type == ScatteringProcessType::EXCITATION)) {
@@ -533,7 +529,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                                   }
 
                                   // transform back to scattering frame
-                                  ParticleUtils::doLorentzTransform(vx, vy, vz, -uCOM_x, -uCOM_y, -uCOM_z);
+                                  ParticleUtils::doGalileanTransform(vx, vy, vz, -uCOM_x, -uCOM_y, -uCOM_z);
 
                                   // update particle velocity with new components in labframe
                                   ux[ip] = vx + ua_x;
@@ -542,7 +538,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
 
                                   // Track collision (interleaved: count at 2*iproc, energy at 2*iproc+1)
                                   if (do_tracking) {
-                                      const double E_final = Algorithms::KineticEnergy<double>(
+                                      const double E_final = Algorithms::NonrelativisticKineticEnergy<double>(
                                           vx + ua_x, vy + ua_y, vz + ua_z, m);
                                       const double E_transfer = E_initial - E_final;
                                       const auto weight = static_cast<amrex::Real>(w[ip]);
@@ -679,7 +675,7 @@ void BackgroundMCCCollision::doBackgroundIonization
                 const amrex::ParticleReal ux = ux_arr[idx];
                 const amrex::ParticleReal uy = uy_arr[idx];
                 const amrex::ParticleReal uz = uz_arr[idx];
-                const double E_electron = Algorithms::KineticEnergy<double>(ux, uy, uz, m);
+                const double E_electron = Algorithms::NonrelativisticKineticEnergy<double>(ux, uy, uz, m);
                 // Energy transfer is approximately the ionization energy + created electron energy
                 const double E_transfer = energy_penalty * PhysConst::q_e + E_electron;
 
