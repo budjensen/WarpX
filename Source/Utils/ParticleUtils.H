@@ -270,6 +270,151 @@ namespace ParticleUtils {
         uz = z * vp;
     }
 
+    /** \brief Rotate a velocity vector by a scattering angle determined by
+     * the anisotropic model of Okhrimovskyy et al. (2002) using the
+     * 3D rotation formulas of Vahedi & Surendra (1995).
+     *
+     * The polar scattering angle chi is sampled from equation (7) of
+     * Okhrimovskyy et al. (2002):
+     *   cos(chi) = 1 - [2*R*(1 - xi)] / [1 + xi*(1 - 2*R)]
+     * where R is a uniform random number in [0,1] and xi is an energy-
+     * dependent anisotropy parameter.  In the limit xi -> 0 the distribution
+     * reduces to isotropic.
+     *
+     * @param[in,out] ux, uy, uz colliding particle's velocity.  On input
+     *                these define the pre-collision direction; on output they
+     *                hold the post-collision velocity with magnitude vp.
+     * @param[in] vp  post-collision speed (magnitude of the velocity vector)
+     * @param[in] vT  transverse velocity component in the x-y plane
+     * @param[in] xi  anisotropy parameter
+     * @param[in] engine the random-engine
+     * @param[out] cos_chi sampled polar scattering-angle cosine
+     */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    void RotateVelocityWithAnisotropicModel ( amrex::ParticleReal& ux,
+                                              amrex::ParticleReal& uy,
+                                              amrex::ParticleReal& uz,
+                                              const amrex::ParticleReal vp,
+                                              const amrex::ParticleReal vT,
+                                              amrex::ParticleReal xi,
+                                              amrex::RandomEngine const& engine,
+                                              amrex::ParticleReal& cos_chi )
+    {
+        using namespace amrex::literals;
+
+        // Azimuthal angle
+        const amrex::ParticleReal phi     = 2.0_prt * MathConst::pi * amrex::Random(engine);
+        const amrex::ParticleReal cos_phi = std::cos(phi);
+        const amrex::ParticleReal sin_phi = std::sin(phi);
+
+        // Polar angle via Okhrimovskyy et al. (2002) eq. (7)
+        constexpr amrex::ParticleReal xi_min = 1.0e-6_prt;
+        if (std::abs(xi) < xi_min) {
+            // isotropic limit
+            cos_chi = 1.0_prt - 2.0_prt * amrex::Random(engine);
+        } else {
+            const amrex::ParticleReal R = amrex::Random(engine);
+            const amrex::ParticleReal p = 1.0_prt - 2.0_prt * R;
+            cos_chi = (xi + p) / (1.0_prt + xi * p);
+            // clamp to [-1, 1] to guard against floating-point rounding
+            cos_chi = std::max(-1.0_prt, std::min(1.0_prt, cos_chi));
+        }
+        const amrex::ParticleReal sin_chi = std::sqrt(std::max(0.0_prt, 1.0_prt - cos_chi*cos_chi));
+
+        // Rotate velocity using Vahedi & Surendra (1995) eq. (11)
+        // The existing uz direction defines the polar axis.
+
+        // Incident particle at rest — scatter isotropically
+        constexpr amrex::ParticleReal v_eps = 1.0e-14_prt;
+        if (vp < v_eps) {
+            amrex::ParticleReal rx, ry, rz;
+            getRandomVector(rx, ry, rz, engine);
+            ux = vp * rx;
+            uy = vp * ry;
+            uz = vp * rz;
+            return;
+        }
+
+        // Use passed-in transverse velocity (pre-computed by caller)
+
+        if (vT > v_eps) {
+            // General case: apply Vahedi & Surendra rotation
+            const amrex::ParticleReal vx_vT = ux / vT;
+            const amrex::ParticleReal vy_vT = uy / vT;
+
+            ux = ux * cos_chi + sin_chi * (vp * vy_vT * sin_phi - uz * vx_vT * cos_phi);
+            uy = uy * cos_chi - sin_chi * (vp * vx_vT * sin_phi + uz * vy_vT * cos_phi);
+            uz = uz * cos_chi + vT * sin_chi * cos_phi;
+        } else {
+            // Particle moves (nearly) along z.  The azimuthal
+            // basis vectors are taken to be x and y.
+            const amrex::ParticleReal sign_vz = (uz >= 0.0_prt) ? 1.0_prt : -1.0_prt;
+            ux = vp * sin_chi * cos_phi;
+            uy = vp * sin_chi * sin_phi;
+            uz = vp * cos_chi * sign_vz;
+        }
+    }
+
+    /** \brief Rotate a velocity vector according to the anisotropic
+     * Okhrimovskyy/Vahedi model while preserving the given speed.
+     *
+     * @param[in,out] ux, uy, uz colliding particle's velocity
+     * @param[in] vp post-collision speed (magnitude of the velocity vector)
+     * @param[in] vT transverse velocity component in the x-y plane
+     * @param[in] xi anisotropy parameter
+     * @param[in] engine the random-engine
+     */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    void AnisotropicScatterVelocity ( amrex::ParticleReal& ux,
+                                      amrex::ParticleReal& uy,
+                                      amrex::ParticleReal& uz,
+                                      const amrex::ParticleReal vp,
+                                      const amrex::ParticleReal vT,
+                                      amrex::ParticleReal xi,
+                                      amrex::RandomEngine const& engine )
+    {
+        amrex::ParticleReal cos_chi;
+        RotateVelocityWithAnisotropicModel(ux, uy, uz, vp, vT, xi, engine, cos_chi);
+    }
+
+    /** \brief Rotate a velocity vector by a scattering angle determined by
+     * the anisotropic model of Okhrimovskyy et al. (2002) using the
+     * 3D rotation formulas of Vahedi & Surendra (1995), then scale the
+     * velocity in accordance with the scattering angle.
+     *
+     * @param[in,out] ux, uy, uz colliding particle's velocity. On input
+     *                these define the pre-collision direction; on output they
+     *                hold the post-collision velocity.
+     * @param[in] vp  post-collision speed (magnitude of the velocity vector)
+     * @param[in] vT  transverse velocity component in the x-y plane
+     * @param[in] xi  anisotropy parameter
+     * @param[in] m, M mass of projectile and target, respectively (used for scaling)
+     * @param[in] engine the random-engine
+     */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    void AnisotropicScatterAndScaleVelocity ( amrex::ParticleReal& ux,
+                                              amrex::ParticleReal& uy,
+                                              amrex::ParticleReal& uz,
+                                              const amrex::ParticleReal vp,
+                                              const amrex::ParticleReal vT,
+                                              amrex::ParticleReal xi,
+                                              amrex::ParticleReal m,
+                                              amrex::ParticleReal M,
+                                              amrex::RandomEngine const& engine )
+    {
+        using namespace amrex::literals;
+
+        amrex::ParticleReal cos_chi;
+        RotateVelocityWithAnisotropicModel(ux, uy, uz, vp, vT, xi, engine, cos_chi);
+
+        // Calculate the scaling factor
+        const amrex::ParticleReal deltaE = 2.0_prt * m / M * (1.0_prt - cos_chi);
+        const amrex::ParticleReal scale_fac = std::sqrt(std::max(0.0_prt, 1.0_prt - deltaE));
+        ux *= scale_fac;
+        uy *= scale_fac;
+        uz *= scale_fac;
+    }
+
     /* \brief Determines whether the point is within the tilebox, inclusive of the boundaries.
      *        Note that this routine is needed since tilebox.contains excludes the boundaries.
      * \param[in] tilebox The tilebox being checked

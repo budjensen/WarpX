@@ -85,6 +85,9 @@ namespace ablastr::constant
         static constexpr auto eV_invc2 = eV / (c * c);
         //! 1 MeV/c^2 in [kg]
         static constexpr auto MeV_invc2 = MeV / (c * c);
+
+        //! Hartree energy in [eV] (= 27.211386245981)
+        static constexpr auto E_h_eV = alpha * alpha * m_e * c * c / q_e;
     } // namespace SI
 } // namespace ablastr::constant
 

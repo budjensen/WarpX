@@ -2647,6 +2647,20 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
     enable_collision_tracking: bool, optional
         Whether to enable tracking of collision counts and energy transfer per cell for each process.
         Default is False.
+
+    anisotropic_scatter: bool, optional
+        Enable the Vahedi/Okhrimovskyy anisotropic scattering model for
+        MCC collision pathways.
+
+    xi_data: string, optional
+        Path to a 2-column file with (energy[eV], xi) used in anisotropic scattering.
+        If not given, the C++ side can still use screened_coulomb if configured.
+
+    B_ioniz: float, optional
+        Vahedi ionization energy partition parameter (in eV).
+        This is only used when an ionization process is present.
+        If omitted, equal post-threshold energy split is used.
+        Can be provided inside the ionization process dictionary.
     """
 
     def __init__(
@@ -2660,6 +2674,9 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         max_background_density=None,
         ndt=None,
         enable_collision_tracking=False,
+        anisotropic_scatter=False,
+        xi_data=None,
+        B_ioniz=None,
         **kw,
     ):
         self.name = name
@@ -2671,6 +2688,9 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         self.max_background_density = max_background_density
         self.ndt = ndt
         self.enable_collision_tracking = enable_collision_tracking
+        self.anisotropic_scatter = anisotropic_scatter
+        self.xi_data = xi_data
+        self.B_ioniz = B_ioniz
 
         self.handle_init(kw)
 
@@ -2694,10 +2714,46 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         collision.max_background_density = self.max_background_density
         collision.ndt = self.ndt
         collision.enable_collision_tracking = self.enable_collision_tracking
+        collision.anisotropic_scatter = self.anisotropic_scatter
+
+        ionization_cfg = self.scattering_processes.get("ionization", None)
+
+        # Resolve optional B_ioniz from either top-level argument or
+        # process-level aliases (ionization["B_ioniz"] or ionization["B"]).
+        process_B = None
+        if ionization_cfg is not None:
+            if "B_ioniz" in ionization_cfg:
+                process_B = ionization_cfg["B_ioniz"]
+
+        resolved_B_ioniz = self.B_ioniz
+        if resolved_B_ioniz is None:
+            resolved_B_ioniz = process_B
+        elif process_B is not None and resolved_B_ioniz != process_B:
+            raise ValueError(
+                "Conflicting B_ioniz values: class argument B_ioniz does not "
+                "match ionization process B_ioniz"
+            )
+
+        if resolved_B_ioniz is not None:
+            if ionization_cfg is None:
+                raise ValueError(
+                    "B_ioniz was provided but no ionization process is present"
+                )
+            if resolved_B_ioniz < 0.0:
+                raise ValueError("B_ioniz must be >= 0")
+            collision.B_ioniz = resolved_B_ioniz
+
+        if self.anisotropic_scatter:
+            if self.xi_data is not None:
+                collision.xi_data = self.xi_data
+            else:
+                collision.screened_coulomb = True
 
         collision.scattering_processes = self.scattering_processes.keys()
         for process, kw in self.scattering_processes.items():
             for key, val in kw.items():
+                if key in ["B_ioniz"]:
+                    continue
                 if key == "species":
                     val = val.name
                 collision.add_new_attr(process + "_" + key, val)

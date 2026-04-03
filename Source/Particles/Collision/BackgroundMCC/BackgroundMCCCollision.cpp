@@ -21,7 +21,53 @@
 #include <AMReX_REAL.H>
 #include <AMReX_Vector.H>
 
+#include <cmath>
+#include <fstream>
 #include <string>
+
+namespace {
+
+void ReadEnergyValueFile(
+    std::string const& input_file,
+    amrex::Vector<amrex::ParticleReal>& energies,
+    amrex::Gpu::HostVector<amrex::ParticleReal>& values)
+{
+    energies.clear();
+    values.clear();
+
+    std::ifstream infile(input_file);
+    if (!infile.is_open()) {
+        WARPX_ABORT_WITH_MESSAGE("Failed to open xi_data file");
+    }
+
+    amrex::ParticleReal energy, value;
+    while (infile >> energy >> value) {
+        energies.push_back(energy);
+        values.push_back(value);
+    }
+    if (infile.bad()) {
+        WARPX_ABORT_WITH_MESSAGE("Failed to read xi_data from file.");
+    }
+    infile.close();
+}
+
+void SanityCheckEnergyGrid(
+    amrex::Vector<amrex::ParticleReal> const& energies,
+    amrex::ParticleReal const dE)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        dE > 0.0,
+        "xi_data energy grid spacing must be positive.");
+
+    // Confirm that the input data was provided on a uniform energy grid.
+    for (unsigned int i = 1; i < energies.size(); ++i) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            (std::abs(energies[i] - energies[i-1] - dE) < dE / 100.0),
+            "xi_data energy grid is not evenly spaced.");
+    }
+}
+
+} // namespace
 
 BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_name)
     : CollisionBase(collision_name)
@@ -90,6 +136,54 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
     // Check if collision tracking is enabled
     pp_collision_name.query("enable_collision_tracking", m_enable_collision_tracking);
 
+    // Check if anisotropic scattering is enabled for scattering processes
+    pp_collision_name.query("anisotropic_scatter", m_anisotropic_scatter);
+
+    // Configure a single xi source for this collision object. This avoids
+    // duplicating identical xi(E) data for each individual scattering process.
+    if (m_anisotropic_scatter) {
+        std::string xi_file;
+        const bool has_xi_file = pp_collision_name.query("xi_data", xi_file);
+        pp_collision_name.query("screened_coulomb", m_use_screened_coulomb);
+
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            has_xi_file || m_use_screened_coulomb,
+            "When anisotropic_scatter = true, specify either xi_data = <path> "
+            "(shared table for this collision type) or screened_coulomb = 1."
+        );
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(has_xi_file && m_use_screened_coulomb),
+            "xi_data and screened_coulomb are mutually exclusive; choose one."
+        );
+
+        if (has_xi_file) {
+            ReadEnergyValueFile(xi_file, m_xi_energies, m_xi_values_h);
+
+            const int xi_grid_size = static_cast<int>(m_xi_energies.size());
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                xi_grid_size >= 2,
+                "xi_data file must contain at least two (energy, xi) points."
+            );
+
+            m_xi_energy_lo = m_xi_energies[0];
+            m_xi_energy_hi = m_xi_energies[xi_grid_size-1];
+            m_xi_dE = (m_xi_energy_hi - m_xi_energy_lo)
+                    / static_cast<amrex::ParticleReal>(xi_grid_size - 1);
+            m_xi_lo = m_xi_values_h[0];
+            m_xi_hi = m_xi_values_h[xi_grid_size-1];
+
+            SanityCheckEnergyGrid(m_xi_energies, m_xi_dE);
+
+#ifdef AMREX_USE_GPU
+            m_xi_values_d.resize(m_xi_values_h.size());
+            amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+                                  m_xi_values_h.begin(), m_xi_values_h.end(),
+                                  m_xi_values_d.begin());
+            amrex::Gpu::streamSynchronize();
+#endif
+        }
+    }
+
     // query for a list of collision processes
     // these could be elastic, excitation, charge_exchange, back, etc.
     amrex::Vector<std::string> scattering_process_names;
@@ -140,11 +234,20 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
             pp_collision_name.get("ionization_species", secondary_species);
             m_species_names.push_back(secondary_species);
 
+            // Optional ionization energy-partition parameter (eV).
+            // If B_ioniz <= 0, equal split is used in the transform functor.
+            utils::parser::queryWithParser(pp_collision_name, "B_ioniz", m_B_ioniz);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                (m_B_ioniz >= 0.0_prt),
+                "B_ioniz must be >= 0 (eV). Use 0 for equal energy split."
+            );
+
             m_ionization_processes.push_back(std::move(process));
         } else {
             m_scattering_processes.push_back(std::move(process));
         }
     }
+
 
 #ifdef AMREX_USE_GPU
     amrex::Gpu::HostVector<ScatteringProcess::Executor> h_scattering_processes_exe;
@@ -339,6 +442,27 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
     }
 }
 
+MCCXiView
+BackgroundMCCCollision::makeXiView () const
+{
+    MCCXiView xi_view;
+    xi_view.m_energy_lo = m_xi_energy_lo;
+    xi_view.m_energy_hi = m_xi_energy_hi;
+    xi_view.m_dE = m_xi_dE;
+    xi_view.m_lo = m_xi_lo;
+    xi_view.m_hi = m_xi_hi;
+
+    if (m_anisotropic_scatter && !m_use_screened_coulomb) {
+#ifdef AMREX_USE_GPU
+        xi_view.m_data = m_xi_values_d.data();
+#else
+        xi_view.m_data = m_xi_values_h.data();
+#endif
+    }
+
+    return xi_view;
+}
+
 
 void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
 ( WarpXParIter& pti, amrex::Real t )
@@ -392,6 +516,10 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     const auto plo = geom.ProbLoArray();
     const auto dxi = geom.InvCellSizeArray();
 
+    // Capture anisotropic_scatter flag for use inside the GPU lambda
+    auto const anisotropic_scatter = m_anisotropic_scatter;
+    auto const xi_view = makeXiView();
+
     amrex::ParallelForRNG(np,
                           [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
                           {
@@ -415,6 +543,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                               amrex::ParticleReal ua_x, ua_y, ua_z, vx, vy, vz;
                               amrex::ParticleReal uCOM_x, uCOM_y, uCOM_z;
                               const amrex::ParticleReal col_select = amrex::Random(engine);
+                              amrex::ParticleReal xi;
 
                               // get velocities of gas particles from a Maxwellian distribution
                               auto const vel_std = sqrt(PhysConst::kb * T_a / M);
@@ -517,9 +646,19 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
 
                                   if ((scattering_process.m_type == ScatteringProcessType::ELASTIC)
                                       || (scattering_process.m_type == ScatteringProcessType::EXCITATION)) {
-                                      ParticleUtils::RandomizeVelocity(
-                                          vx, vy, vz, sqrt(vx*vx + vy*vy + vz*vz), engine
-                                      );
+                                      if (anisotropic_scatter) {
+                                          // xi is evaluated with the post-threshold energy
+                                          xi = xi_view.getXi(static_cast<amrex::ParticleReal>(E_coll));
+                                          const amrex::ParticleReal v_mag = sqrt(vx*vx + vy*vy + vz*vz);
+                                          const amrex::ParticleReal vT = sqrt(vx*vx + vy*vy);
+                                          ParticleUtils::AnisotropicScatterAndScaleVelocity(
+                                              vx, vy, vz, v_mag, vT, xi, m, M, engine
+                                          );
+                                      } else {
+                                          ParticleUtils::RandomizeVelocity(
+                                              vx, vy, vz, sqrt(vx*vx + vy*vy + vz*vz), engine
+                                          );
+                                      }
                                   }
                                   else if (scattering_process.m_type == ScatteringProcessType::BACK) {
                                       // elastic scattering with cos(chi) = -1 (i.e. 180 degrees)
@@ -587,6 +726,9 @@ void BackgroundMCCCollision::doBackgroundIonization
     // Get ionization process index (it's after all scattering processes)
     const int ionization_comp_idx = static_cast<int>(m_scattering_processes.size());
 
+    auto const anisotropic_scatter = m_anisotropic_scatter;
+    auto const xi_view = makeXiView();
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -612,7 +754,8 @@ void BackgroundMCCCollision::doBackgroundIonization
 
         auto Transform = ImpactIonizationTransformFunc(
                                                        m_ionization_processes[0].getEnergyPenalty(),
-                                                       m_mass1, sqrt_kb_m, m_background_temperature_func, t
+                                                       m_mass1, sqrt_kb_m, m_background_temperature_func, t,
+                                                       anisotropic_scatter, m_B_ioniz, xi_view
                                                        );
 
         const auto num_added = filterCopyTransformParticles<1>(species1, species2,

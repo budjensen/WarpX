@@ -8,6 +8,7 @@
 #define WARPX_PARTICLES_COLLISION_IMPACT_IONIZATION_H_
 
 #include "Particles/Collision/ScatteringProcess.H"
+#include "XiView.H"
 
 #include "Particles/Algorithms/KineticEnergy.H"
 #include "Utils/ParticleUtils.H"
@@ -146,12 +147,19 @@ public:
     * @param[in] T_a_func ParserExecutor<4> function to get the background
                  temperature in Kelvin as a function of space and time
     * @param[in] t the current simulation time
+    * @param[in] anisotropic_scatter toggle anisotropic ionization electron scattering
+    * @param[in] B_ioniz Vahedi energy partition parameter (eV).
+    *            If B_ioniz <= 0, equal post-threshold energy split is used.
+    * @param[in] xi_view collision-level xi(E) source for anisotropic scattering
     */
     ImpactIonizationTransformFunc(
         amrex::ParticleReal energy_cost, double mass1, amrex::ParticleReal sqrt_kb_m,
-        amrex::ParserExecutor<4> const& T_a_func, amrex::Real t
+        amrex::ParserExecutor<4> const& T_a_func, amrex::Real t,
+        bool anisotropic_scatter, amrex::ParticleReal B_ioniz, MCCXiView xi_view
     ) :  m_energy_cost(energy_cost), m_mass1(mass1),
-         m_sqrt_kb_m(sqrt_kb_m), m_T_a_func(T_a_func), m_t(t) { }
+         m_sqrt_kb_m(sqrt_kb_m), m_T_a_func(T_a_func), m_t(t),
+         m_anisotropic_scatter(anisotropic_scatter), m_B_ioniz(B_ioniz),
+         m_xi_view(xi_view) { }
 
     /**
     * \brief Functor call. It determines the properties of the generated pair
@@ -175,6 +183,8 @@ public:
     {
         using namespace amrex;
         using std::sqrt;
+        using std::atan;
+        using std::tan;
 
         // get references to the particle to get its position
         const auto& p = src.getSuperParticle(i_src);
@@ -203,14 +213,66 @@ public:
         constexpr auto eV = PhysConst::q_e;
         E_coll = Algorithms::NonrelativisticKineticEnergy<double>(ux, uy, uz, m_mass1)/eV;
 
-        // each electron gets half the energy (could change this later)
-        const auto E_out = static_cast<amrex::ParticleReal>((E_coll - m_energy_cost) / 2.0_prt * eV);
+        amrex::ParticleReal E_inc = static_cast<amrex::ParticleReal>(E_coll);
+        amrex::ParticleReal E_avail = E_inc - m_energy_cost;
+        if (E_avail < 0.0_prt) {
+            E_avail = 0.0_prt;
+        }
 
-        const amrex::ParticleReal up = sqrt(2.0_prt * E_out / m_mass1);
+        amrex::ParticleReal E_ej = 0.0_prt;
+        amrex::ParticleReal E_prim = 0.0_prt;
 
-        // isotropically scatter electrons
-        ParticleUtils::RandomizeVelocity(ux, uy, uz, up, engine);
-        ParticleUtils::RandomizeVelocity(e_ux, e_uy, e_uz, up, engine);
+        // If B_ioniz <= 0, use equal split. Otherwise, sample Vahedi partition.
+        if (m_B_ioniz > 0.0_prt) {
+            if (E_avail > 0.0_prt) {
+                const amrex::ParticleReal theta_max = atan(E_avail / (2.0_prt * m_B_ioniz));
+                E_ej = m_B_ioniz * tan(Random(engine) * theta_max);
+                if (E_ej < 0.0_prt) {
+                    E_ej = 0.0_prt;
+                } else if (E_ej > E_avail) {
+                    E_ej = E_avail;
+                }
+            }
+            E_prim = E_avail - E_ej;
+            if (E_prim < 0.0_prt) {
+                E_prim = 0.0_prt;
+            }
+        } else {
+            // Equal post-threshold energy split.
+            E_prim = 0.5_prt * E_avail;
+            E_ej = E_prim;
+        }
+
+        const amrex::ParticleReal up_prim = sqrt(2.0_prt * E_prim * eV / m_mass1);
+        const amrex::ParticleReal up_ej = sqrt(2.0_prt * E_ej * eV / m_mass1);
+
+        if (m_anisotropic_scatter) {
+            // Scale incident velocities to the appropriate post-collision energies
+            const amrex::ParticleReal v_inc = sqrt(ux*ux + uy*uy + uz*uz);
+
+            const amrex::ParticleReal scale_ej = up_ej / v_inc;
+            e_ux = ux * scale_ej;
+            e_uy = uy * scale_ej;
+            e_uz = uz * scale_ej;
+
+            const amrex::ParticleReal scale_prim = up_prim / v_inc;
+            ux *= scale_prim;
+            uy *= scale_prim;
+            uz *= scale_prim;
+
+            const amrex::ParticleReal xi_prim = m_xi_view.getXi(E_prim);
+            const amrex::ParticleReal xi_ej = m_xi_view.getXi(E_ej);
+
+            // Compute transverse velocity components for the anisotropic scattering
+            const amrex::ParticleReal vT_prim = sqrt(ux*ux + uy*uy);
+            const amrex::ParticleReal vT_ej = sqrt(e_ux*e_ux + e_uy*e_uy);
+
+            ParticleUtils::AnisotropicScatterVelocity(ux, uy, uz, up_prim, vT_prim, xi_prim, engine);
+            ParticleUtils::AnisotropicScatterVelocity(e_ux, e_uy, e_uz, up_ej, vT_ej, xi_ej, engine);
+        } else {
+            ParticleUtils::RandomizeVelocity(ux, uy, uz, up_prim, engine);
+            ParticleUtils::RandomizeVelocity(e_ux, e_uy, e_uz, up_ej, engine);
+        }
 
         // get velocities for the ion from a Maxwellian distribution
         i_ux = ion_vel_std * RandomNormal(0_prt, 1.0_prt, engine);
@@ -224,5 +286,8 @@ private:
     amrex::ParticleReal m_sqrt_kb_m;
     amrex::ParserExecutor<4> m_T_a_func;
     amrex::Real m_t;
+    bool m_anisotropic_scatter = false;
+    amrex::ParticleReal m_B_ioniz = 0;
+    MCCXiView m_xi_view;
 };
 #endif // WARPX_PARTICLES_COLLISION_IMPACT_IONIZATION_H_

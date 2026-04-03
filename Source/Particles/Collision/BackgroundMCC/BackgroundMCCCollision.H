@@ -10,6 +10,7 @@
 #include "Particles/MultiParticleContainer.H"
 #include "Particles/Collision/CollisionBase.H"
 #include "Particles/Collision/ScatteringProcess.H"
+#include "XiView.H"
 
 #include <AMReX_Parser.H>
 #include <AMReX_REAL.H>
@@ -153,6 +154,9 @@ private:
 #endif
     }
 
+    [[nodiscard]]
+    MCCXiView makeXiView () const;
+
     amrex::Vector<ScatteringProcess> m_scattering_processes;
     amrex::Vector<ScatteringProcess> m_ionization_processes;
     amrex::Gpu::DeviceVector<ScatteringProcess::Executor> m_scattering_processes_exe;
@@ -160,6 +164,24 @@ private:
 
     bool init_flag = false;
     bool ionization_flag = false;
+
+    // When true, ELASTIC and EXCITATION processes use the anisotropic
+    // Okhrimovskyy/Vahedi scattering model instead of isotropic scattering
+    bool m_anisotropic_scatter = false;
+    bool m_use_screened_coulomb = false;
+    amrex::ParticleReal m_B_ioniz = 0;
+
+    // Collision-level xi(E) data shared across all pathways.
+    amrex::Vector<amrex::ParticleReal> m_xi_energies;
+    amrex::Gpu::HostVector<amrex::ParticleReal> m_xi_values_h;
+#ifdef AMREX_USE_GPU
+    amrex::Gpu::DeviceVector<amrex::ParticleReal> m_xi_values_d;
+#endif
+    amrex::ParticleReal m_xi_energy_lo = 0;
+    amrex::ParticleReal m_xi_energy_hi = 0;
+    amrex::ParticleReal m_xi_dE = 0;
+    amrex::ParticleReal m_xi_lo = 0;
+    amrex::ParticleReal m_xi_hi = 0;
 
     amrex::ParticleReal m_mass1;
 
