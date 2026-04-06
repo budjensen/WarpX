@@ -1,0 +1,26 @@
+#!/bin/bash
+#SBATCH -J sample_ICP_job
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=40
+#SBATCH --time=01:00:00
+#SBATCH --mem-per-cpu=3G
+#SBATCH --output warpx.%j.out
+
+export OMP_NUM_THREADS=1
+export PYTHONPATH=/home/bj8080/src/WarpX/build_icp_stabilization/lib/site-packages
+
+# set dependencies
+module purge
+module load anaconda3/2024.10
+conda activate warpx_one_node
+
+RUNFILE="inputs.py"
+DIAGFILE="diags"
+
+# copy the input file to the directory diags
+mkdir -p "$DIAGFILE"
+cp "$RUNFILE" "$DIAGFILE"
+
+# run program
+mpirun -n 40 python "$RUNFILE" -d "$DIAGFILE"
