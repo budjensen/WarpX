@@ -40,22 +40,13 @@ void WarpX::ComputeSpaceChargeField (bool const reset_fields)
     m_electrostatic_solver->ComputeSpaceChargeField(
         m_fields, *mypc, myfl.get(), max_level );
 
-    // Apply ICP heating if enabled (for electrostatic simulations)
+    // Apply ICP heating if enabled (for electrostatic simulations).
+    // UpdateTransverseElectricField handles current deposition, MPI sync,
+    // and the full field update for whichever integrator is selected.
     if (m_icp_heating_model && m_icp_heating_model->is_enabled()) {
         for (int lev = 0; lev <= max_level; ++lev) {
-            // Step 1: Deposit current from particles
-            m_icp_heating_model->ComputeTransverseConductionCurrent(
-                m_fields, lev, dt[lev], *mypc
-            );
-
-            // Step 2: Sum current boundary cells to handle MPI domain boundary cells
-            ablastr::fields::MultiLevelVectorField J_fp =
-                m_fields.get_mr_levels_alldirs(FieldType::current_fp, lev);
-            SumBoundaryJ(J_fp, lev, Geom(lev).periodicity());
-
-            // Step 3: Update E_y
             m_icp_heating_model->UpdateTransverseElectricField(
-                m_fields, lev, t_new[lev], dt[lev]
+                m_fields, lev, t_new[lev], dt[lev], *mypc
             );
         }
     }
