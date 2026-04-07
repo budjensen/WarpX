@@ -260,52 +260,52 @@ void ICPHeatingModel::UpdateTransverseElectricField(
     }
 
     // -------------------------------------------------------------------------
-    // RK4 (to be implemented)
+    // Classic 4-stage Runge-Kutta (RK4)
     //
-    //   k1 = F(E_y^n,           t_n)       — no particle push
-    //   k2 = F(E_y^n + dt/2*k1, t_n+dt/2) — push uy^n by dt/2 with Ey^n+dt/2*k1
-    //   k3 = F(E_y^n + dt/2*k2, t_n+dt/2) — restore, push uy^n by dt/2 with Ey^n+dt/2*k2
-    //   k4 = F(E_y^n + dt  *k3, t_n+dt  ) — restore, push uy^n by dt   with Ey^n+dt*k3
-    //   E_y^{n+1} = E_y^n + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
+    //   k1 = F(E_y^n,           t_n)
+    //   k2 = F(E_y^n + dt/2*k1, t_n + dt/2)   push uy^n by dt/2
+    //   k3 = F(E_y^n + dt/2*k2, t_n + dt/2)   restore uy^n, push by dt/2
+    //   k4 = F(E_y^n + dt  *k3, t_n + dt  )   restore uy^n, push by dt
+    //   E_y^{n+1} = E_y^n + (dt/6)*(k1 + 2*k2 + 2*k3 + k4)
     //   Restore uy^n
-    //
-    //   MultiFab* k2 = fields.get("k2_icp", lev);
-    //   MultiFab* k3 = fields.get("k3_icp", lev);
-    //   MultiFab* k4 = fields.get("k4_icp", lev);
-    //
-    //   SaveTransverseMomenta(mpc, lev);
-    //
-    //   // k1 — current particle state (uy^n), current E_y = E_y^n
-    //   DepositTransverseCurrent(fields, lev, dt, mpc);
-    //   ComputeEyRHS(fields, lev, time, *k1);
-    //
-    //   // k2
-    //   SetTransverseElectricField(fields, lev, *Ey_base, 0.5_rt*dt, *k1);
-    //   PushTransverseMomenta(fields, lev, 0.5_rt*dt, mpc);
-    //   DepositTransverseCurrent(fields, lev, dt, mpc);
-    //   ComputeEyRHS(fields, lev, time + 0.5_rt*dt, *k2);
-    //
-    //   // k3
-    //   RestoreTransverseMomenta(mpc, lev);
-    //   SetTransverseElectricField(fields, lev, *Ey_base, 0.5_rt*dt, *k2);
-    //   PushTransverseMomenta(fields, lev, 0.5_rt*dt, mpc);
-    //   DepositTransverseCurrent(fields, lev, dt, mpc);
-    //   ComputeEyRHS(fields, lev, time + 0.5_rt*dt, *k3);
-    //
-    //   // k4
-    //   RestoreTransverseMomenta(mpc, lev);
-    //   SetTransverseElectricField(fields, lev, *Ey_base, dt, *k3);
-    //   PushTransverseMomenta(fields, lev, dt, mpc);
-    //   DepositTransverseCurrent(fields, lev, dt, mpc);
-    //   ComputeEyRHS(fields, lev, time + dt, *k4);
-    //
-    //   // Final: E_y^{n+1} = E_y^n + dt/6*(k1 + 2*k2 + 2*k3 + k4)
-    //   // ApplyRK4Update(fields, lev, Ey_base, dt, k1, k2, k3, k4)
-    //   RestoreTransverseMomenta(mpc, lev);
-    //   m_is_first_step = false;
     // -------------------------------------------------------------------------
     else if (m_integrator == ICPIntegrator::RK4) {
-        WARPX_ABORT_WITH_MESSAGE("ICP RK4 not yet implemented.");
+
+        MultiFab* k2 = fields.get("k2_icp", lev);
+        MultiFab* k3 = fields.get("k3_icp", lev);
+        MultiFab* k4 = fields.get("k4_icp", lev);
+
+        SaveTransverseMomenta(mpc, lev);
+
+        // k1 — current particle state (uy^n), field = E_y^n
+        DepositTransverseCurrent(fields, lev, dt, mpc);
+        ComputeEyRHS(fields, lev, time, *k1);
+
+        // k2 — field = E_y^n + (dt/2)*k1, particles pushed by dt/2
+        SetTransverseElectricField(fields, lev, *Ey_base, 0.5_rt*dt, *k1);
+        PushTransverseMomenta(fields, lev, 0.5_rt*dt, mpc);
+        DepositTransverseCurrent(fields, lev, dt, mpc);
+        ComputeEyRHS(fields, lev, time + 0.5_rt*dt, *k2);
+
+        // k3 — field = E_y^n + (dt/2)*k2, particles pushed by dt/2 from uy^n
+        RestoreTransverseMomenta(mpc, lev);
+        SetTransverseElectricField(fields, lev, *Ey_base, 0.5_rt*dt, *k2);
+        PushTransverseMomenta(fields, lev, 0.5_rt*dt, mpc);
+        DepositTransverseCurrent(fields, lev, dt, mpc);
+        ComputeEyRHS(fields, lev, time + 0.5_rt*dt, *k3);
+
+        // k4 — field = E_y^n + dt*k3, particles pushed by dt from uy^n
+        RestoreTransverseMomenta(mpc, lev);
+        SetTransverseElectricField(fields, lev, *Ey_base, dt, *k3);
+        PushTransverseMomenta(fields, lev, dt, mpc);
+        DepositTransverseCurrent(fields, lev, dt, mpc);
+        ComputeEyRHS(fields, lev, time + dt, *k4);
+
+        // Final: E_y^{n+1} = E_y^n + (dt/6)*(k1 + 2*k2 + 2*k3 + k4)
+        ApplyRK4Update(fields, lev, *Ey_base, dt, *k1, *k2, *k3, *k4);
+        RestoreTransverseMomenta(mpc, lev);   // uy back to uy^n
+
+        m_is_first_step = false;
     }
 }
 
@@ -630,6 +630,62 @@ void ICPHeatingModel::ApplyRK2Update(
             if (z >= z_min && z <= z_max) {
                 Real Ey_new = base_arr(i, j, kk)
                             + dt_half * (k1_arr(i, j, kk) + k2_arr(i, j, kk));
+                Ey_new = amrex::max(-ey_max, amrex::min(ey_max, Ey_new));
+                Ey_arr(i, j, kk) = Ey_new;
+            } else {
+                Ey_arr(i, j, kk) = 0.0_rt;
+            }
+        });
+    }
+}
+
+void ICPHeatingModel::ApplyRK4Update(
+    ablastr::fields::MultiFabRegister& fields,
+    int lev,
+    amrex::MultiFab const& Ey_base,
+    amrex::Real dt,
+    amrex::MultiFab const& k1,
+    amrex::MultiFab const& k2,
+    amrex::MultiFab const& k3,
+    amrex::MultiFab const& k4)
+{
+    WARPX_PROFILE("ICPHeatingModel::ApplyRK4Update");
+
+    using ablastr::fields::Direction;
+
+    MultiFab* Ey_fp = fields.get(FieldType::Efield_fp, Direction{1}, lev);
+
+    const Geometry& geom = WarpX::GetInstance().Geom(lev);
+    const Real* dx  = geom.CellSize();
+    const Real* plo = geom.ProbLo();
+    const Real dz   = dx[WARPX_ZINDEX];
+    const Real zmin = plo[WARPX_ZINDEX];
+
+    const Real z_min    = m_z_min;
+    const Real z_max    = m_z_max;
+    const Real ey_max   = m_ey_max;
+    const Real dt_sixth = dt / 6.0_rt;
+
+    for (MFIter mfi(*Ey_fp, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+
+        auto const& Ey_arr   = Ey_fp->array(mfi);
+        auto const& base_arr = Ey_base.const_array(mfi);
+        auto const& k1_arr   = k1.const_array(mfi);
+        auto const& k2_arr   = k2.const_array(mfi);
+        auto const& k3_arr   = k3.const_array(mfi);
+        auto const& k4_arr   = k4.const_array(mfi);
+
+        // E_y^{n+1} = E_y^n + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int kk) {
+            const Real z = zmin + (i + 0.5_rt) * dz;
+
+            if (z >= z_min && z <= z_max) {
+                Real Ey_new = base_arr(i, j, kk)
+                            + dt_sixth * (k1_arr(i, j, kk)
+                                        + 2.0_rt * k2_arr(i, j, kk)
+                                        + 2.0_rt * k3_arr(i, j, kk)
+                                        + k4_arr(i, j, kk));
                 Ey_new = amrex::max(-ey_max, amrex::min(ey_max, Ey_new));
                 Ey_arr(i, j, kk) = Ey_new;
             } else {

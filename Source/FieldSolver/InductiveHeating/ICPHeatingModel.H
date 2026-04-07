@@ -274,6 +274,24 @@ private:
         amrex::MultiFab const& k2
     );
 
+    /**
+     * \brief Apply classic RK4 final update.
+     *
+     *   E_y^{n+1} = E_y^n + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+     *
+     * Zeros Efield_fp[1] outside [z_min, z_max] and clamps to [-ey_max, +ey_max].
+     */
+    void ApplyRK4Update(
+        ablastr::fields::MultiFabRegister& fields,
+        int lev,
+        amrex::MultiFab const& Ey_base,
+        amrex::Real dt,
+        amrex::MultiFab const& k1,
+        amrex::MultiFab const& k2,
+        amrex::MultiFab const& k3,
+        amrex::MultiFab const& k4
+    );
+
     // -------------------------------------------------------------------------
     // Parameters read from input file
     // -------------------------------------------------------------------------
