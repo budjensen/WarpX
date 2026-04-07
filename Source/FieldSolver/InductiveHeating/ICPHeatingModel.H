@@ -258,6 +258,22 @@ private:
         amrex::MultiFab const& F_prev
     );
 
+    /**
+     * \brief Apply RK2 (Heun's) final update.
+     *
+     *   E_y^{n+1} = E_y^n + (dt/2) * (k1 + k2)
+     *
+     * Zeros Efield_fp[1] outside [z_min, z_max] and clamps to [-ey_max, +ey_max].
+     */
+    void ApplyRK2Update(
+        ablastr::fields::MultiFabRegister& fields,
+        int lev,
+        amrex::MultiFab const& Ey_base,
+        amrex::Real dt,
+        amrex::MultiFab const& k1,
+        amrex::MultiFab const& k2
+    );
+
     // -------------------------------------------------------------------------
     // Parameters read from input file
     // -------------------------------------------------------------------------

@@ -229,35 +229,34 @@ void ICPHeatingModel::UpdateTransverseElectricField(
     }
 
     // -------------------------------------------------------------------------
-    // RK2 / Heun's method (to be implemented)
+    // RK2 / Heun's method
     //
-    //   Stage 1 — k1 = F(E_y^n, t_n):
-    //     DepositTransverseCurrent → ComputeEyRHS → k1
-    //
-    //   Stage 2 — k2 = F(E_y^n + dt*k1, t_n + dt):
-    //     SetTransverseElectricField(Ey_base, dt, k1)    // Ey_fp <- Ey^n + dt*k1
-    //     PushTransverseMomenta(dt)                       // uy <- uy^n + dt*push
-    //     DepositTransverseCurrent → ComputeEyRHS → k2
-    //
-    //   Final:
-    //     E_y^{n+1} = E_y^n + dt/2 * (k1 + k2)
-    //     RestoreTransverseMomenta                        // uy back to uy^n
-    //
-    //   MultiFab* k2 = fields.get("k2_icp", lev);
-    //
-    //   SaveTransverseMomenta(mpc, lev);
-    //   DepositTransverseCurrent(fields, lev, dt, mpc);
-    //   ComputeEyRHS(fields, lev, time, *k1);
-    //   SetTransverseElectricField(fields, lev, *Ey_base, dt, *k1);
-    //   PushTransverseMomenta(fields, lev, dt, mpc);
-    //   DepositTransverseCurrent(fields, lev, dt, mpc);
-    //   ComputeEyRHS(fields, lev, time + dt, *k2);
-    //   // ApplyRK2Update(Ey_base, dt, k1, k2) -- E_y^{n+1} = Ey^n + dt/2*(k1+k2)
-    //   RestoreTransverseMomenta(mpc, lev);
-    //   m_is_first_step = false;
+    //   k1 = F(E_y^n,        t_n)       — deposit with uy^n
+    //   k2 = F(E_y^n + dt*k1, t_n + dt) — push uy^n by dt, deposit
+    //   E_y^{n+1} = E_y^n + (dt/2) * (k1 + k2)
+    //   Restore uy^n
     // -------------------------------------------------------------------------
     else if (m_integrator == ICPIntegrator::RK2) {
-        WARPX_ABORT_WITH_MESSAGE("ICP RK2 not yet implemented.");
+
+        MultiFab* k2 = fields.get("k2_icp", lev);
+
+        SaveTransverseMomenta(mpc, lev);
+
+        // Stage 1 — k1 = F(E_y^n, t_n)
+        DepositTransverseCurrent(fields, lev, dt, mpc);
+        ComputeEyRHS(fields, lev, time, *k1);
+
+        // Stage 2 — k2 = F(E_y^n + dt*k1, t_n + dt)
+        SetTransverseElectricField(fields, lev, *Ey_base, dt, *k1);   // Ey_fp ← Ey^n + dt*k1
+        PushTransverseMomenta(fields, lev, dt, mpc);                   // uy ← uy^n + dt*(q/m)*Ey
+        DepositTransverseCurrent(fields, lev, dt, mpc);
+        ComputeEyRHS(fields, lev, time + dt, *k2);
+
+        // Final: E_y^{n+1} = E_y^n + (dt/2)*(k1 + k2)
+        ApplyRK2Update(fields, lev, *Ey_base, dt, *k1, *k2);
+        RestoreTransverseMomenta(mpc, lev);   // uy back to uy^n
+
+        m_is_first_step = false;
     }
 
     // -------------------------------------------------------------------------
@@ -582,6 +581,55 @@ void ICPHeatingModel::ApplyAB2Update(
                 Real Ey_new = base_arr(i, j, kk)
                             + dt * (1.5_rt * fn_arr(i, j, kk)
                                   - 0.5_rt * fprev_arr(i, j, kk));
+                Ey_new = amrex::max(-ey_max, amrex::min(ey_max, Ey_new));
+                Ey_arr(i, j, kk) = Ey_new;
+            } else {
+                Ey_arr(i, j, kk) = 0.0_rt;
+            }
+        });
+    }
+}
+
+void ICPHeatingModel::ApplyRK2Update(
+    ablastr::fields::MultiFabRegister& fields,
+    int lev,
+    amrex::MultiFab const& Ey_base,
+    amrex::Real dt,
+    amrex::MultiFab const& k1,
+    amrex::MultiFab const& k2)
+{
+    WARPX_PROFILE("ICPHeatingModel::ApplyRK2Update");
+
+    using ablastr::fields::Direction;
+
+    MultiFab* Ey_fp = fields.get(FieldType::Efield_fp, Direction{1}, lev);
+
+    const Geometry& geom = WarpX::GetInstance().Geom(lev);
+    const Real* dx  = geom.CellSize();
+    const Real* plo = geom.ProbLo();
+    const Real dz   = dx[WARPX_ZINDEX];
+    const Real zmin = plo[WARPX_ZINDEX];
+
+    const Real z_min  = m_z_min;
+    const Real z_max  = m_z_max;
+    const Real ey_max = m_ey_max;
+    const Real dt_half = 0.5_rt * dt;
+
+    for (MFIter mfi(*Ey_fp, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+
+        auto const& Ey_arr   = Ey_fp->array(mfi);
+        auto const& base_arr = Ey_base.const_array(mfi);
+        auto const& k1_arr   = k1.const_array(mfi);
+        auto const& k2_arr   = k2.const_array(mfi);
+
+        // E_y^{n+1} = E_y^n + (dt/2) * (k1 + k2)
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int kk) {
+            const Real z = zmin + (i + 0.5_rt) * dz;
+
+            if (z >= z_min && z <= z_max) {
+                Real Ey_new = base_arr(i, j, kk)
+                            + dt_half * (k1_arr(i, j, kk) + k2_arr(i, j, kk));
                 Ey_new = amrex::max(-ey_max, amrex::min(ey_max, Ey_new));
                 Ey_arr(i, j, kk) = Ey_new;
             } else {
