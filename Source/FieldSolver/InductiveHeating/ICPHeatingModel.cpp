@@ -203,26 +203,29 @@ void ICPHeatingModel::UpdateTransverseElectricField(
     }
 
     // -------------------------------------------------------------------------
-    // Adams-Bashforth 2-step (to be implemented)
+    // Adams-Bashforth 2-step
     //
     //   E_y^{n+1} = E_y^n + dt * (3/2 * F_n - 1/2 * F_{n-1})
     //
-    // Bootstrap: on the first step, fall back to Euler (F_{n-1} unavailable).
-    //
-    //   MultiFab* F_prev = fields.get("F_prev_icp", lev);
-    //
-    //   DepositTransverseCurrent(fields, lev, dt, mpc);
-    //   ComputeEyRHS(fields, lev, time, *k1);           // k1 = F_n
-    //   if (m_is_first_step) {
-    //       SetTransverseElectricField(fields, lev, *Ey_base, dt, *k1);
-    //   } else {
-    //       // ApplyAB2Update(Ey_base, dt, k1, F_prev) -- needs helper
-    //   }
-    //   MultiFab::Copy(*F_prev, *k1, 0, 0, 1, 0);      // advance history
-    //   m_is_first_step = false;
+    // Bootstrap: on the first step, F_{n-1} is unavailable so fall back to
+    // Euler.  F_n is then copied into F_prev to seed the next step.
     // -------------------------------------------------------------------------
     else if (m_integrator == ICPIntegrator::AB2) {
-        WARPX_ABORT_WITH_MESSAGE("ICP Adams-Bashforth 2-step not yet implemented.");
+
+        MultiFab* F_prev = fields.get("F_prev_icp", lev);
+
+        DepositTransverseCurrent(fields, lev, dt, mpc);   // J_cond^n → current_fp[1]
+        ComputeEyRHS(fields, lev, time, *k1);             // k1 = F_n
+
+        if (m_is_first_step) {
+            // Bootstrap with Euler — F_{n-1} not yet available
+            SetTransverseElectricField(fields, lev, *Ey_base, dt, *k1);
+        } else {
+            ApplyAB2Update(fields, lev, *Ey_base, dt, *k1, *F_prev);
+        }
+
+        MultiFab::Copy(*F_prev, *k1, 0, 0, 1, 0);   // F_{n-1} ← F_n for next step
+        m_is_first_step = false;
     }
 
     // -------------------------------------------------------------------------
@@ -525,6 +528,60 @@ void ICPHeatingModel::SetTransverseElectricField(
 
             if (z >= z_min && z <= z_max) {
                 Real Ey_new = base_arr(i, j, kk) + coeff * F_arr(i, j, kk);
+                Ey_new = amrex::max(-ey_max, amrex::min(ey_max, Ey_new));
+                Ey_arr(i, j, kk) = Ey_new;
+            } else {
+                Ey_arr(i, j, kk) = 0.0_rt;
+            }
+        });
+    }
+}
+
+// =============================================================================
+// Final-update helpers: write weighted RHS sum into Efield_fp[1]
+// Each applies the same field limiter and region mask as SetTransverseElectricField.
+// =============================================================================
+
+void ICPHeatingModel::ApplyAB2Update(
+    ablastr::fields::MultiFabRegister& fields,
+    int lev,
+    amrex::MultiFab const& Ey_base,
+    amrex::Real dt,
+    amrex::MultiFab const& F_n,
+    amrex::MultiFab const& F_prev)
+{
+    WARPX_PROFILE("ICPHeatingModel::ApplyAB2Update");
+
+    using ablastr::fields::Direction;
+
+    MultiFab* Ey_fp = fields.get(FieldType::Efield_fp, Direction{1}, lev);
+
+    const Geometry& geom = WarpX::GetInstance().Geom(lev);
+    const Real* dx  = geom.CellSize();
+    const Real* plo = geom.ProbLo();
+    const Real dz   = dx[WARPX_ZINDEX];
+    const Real zmin = plo[WARPX_ZINDEX];
+
+    const Real z_min  = m_z_min;
+    const Real z_max  = m_z_max;
+    const Real ey_max = m_ey_max;
+
+    for (MFIter mfi(*Ey_fp, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+
+        auto const& Ey_arr    = Ey_fp->array(mfi);
+        auto const& base_arr  = Ey_base.const_array(mfi);
+        auto const& fn_arr    = F_n.const_array(mfi);
+        auto const& fprev_arr = F_prev.const_array(mfi);
+
+        // E_y^{n+1} = E_y^n + dt * (3/2 * F_n - 1/2 * F_{n-1})
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int kk) {
+            const Real z = zmin + (i + 0.5_rt) * dz;
+
+            if (z >= z_min && z <= z_max) {
+                Real Ey_new = base_arr(i, j, kk)
+                            + dt * (1.5_rt * fn_arr(i, j, kk)
+                                  - 0.5_rt * fprev_arr(i, j, kk));
                 Ey_new = amrex::max(-ey_max, amrex::min(ey_max, Ey_new));
                 Ey_arr(i, j, kk) = Ey_new;
             } else {

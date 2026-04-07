@@ -238,6 +238,26 @@ public:
     );
 
 private:
+    // =========================================================================
+    // Final-update helpers — write the weighted RHS sum into Efield_fp[1]
+    // =========================================================================
+
+    /**
+     * \brief Apply Adams-Bashforth 2-step final update.
+     *
+     *   E_y^{n+1} = E_y^n + dt * (3/2 * F_n - 1/2 * F_prev)
+     *
+     * Zeros Efield_fp[1] outside [z_min, z_max] and clamps to [-ey_max, +ey_max].
+     */
+    void ApplyAB2Update(
+        ablastr::fields::MultiFabRegister& fields,
+        int lev,
+        amrex::MultiFab const& Ey_base,
+        amrex::Real dt,
+        amrex::MultiFab const& F_n,
+        amrex::MultiFab const& F_prev
+    );
+
     // -------------------------------------------------------------------------
     // Parameters read from input file
     // -------------------------------------------------------------------------
