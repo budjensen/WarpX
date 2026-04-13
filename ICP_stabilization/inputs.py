@@ -22,56 +22,74 @@ eV_in_K = 11605.41586
 
 
 class CapacitiveDischargeExample(object):
-    # Simulation parameters
-    zmin = 0  # m
-    zmax = 40 * milli  # m
+
+    # ---------------------------------------------------------------
+    # Stability related parameters
+    # ---------------------------------------------------------------
+    dz = 2.e-5                      # Cell size, will be checked against Debye length
+    dt = 1e-11                      # Time step, will be calculated based on plasma frequency and grid size
+    plasma_density = 5e15           # [m^-3]
+    seed_nppc = 4                   # Number of particles per cell (only loosely related to stability)
 
     # ICP heating parameters
-    freq = 10e6  # Hz, ICP frequency
-    ICP_mag = 250.0  # A/m^2, ICP current density amplitude
-    zmin_icp = 5 * milli  # m, ICP region minimum z
-    zmax_icp = 15 * milli  # m, ICP region maximum z
-    integrator = "euler"  # euler | ab2 | rk2 | rk4, ICP heating integrator
+    freq = 10e6                     # Hz, ICP frequency
+    ICP_mag = 250.0                 # A/m^2, ICP current density amplitude
+    zmin_icp = 5 * milli            # m, ICP region minimum z
+    zmax_icp = 15 * milli           # m, ICP region maximum z
+    integrator = "euler"            # euler | ab2 | rk2 | rk4
 
-    # T and n profile parameters
-    gas_temp = 300  # [K]
-    gas_pressure = 1 * milli  # [Torr]
-    gas_density = 133.32 * gas_pressure / gas_temp / constants.kb  # [m^-3]
-    m_ion = 6.634e-26  # [kg]
-    m_gas = m_ion  # [kg]
-
-    # Particle setup
-    plasma_density = 5e15  # [m^-3]
-    elec_temp = 3.5 * eV_in_K  # [eV] to [K]
-    ion_temp = 300  # [K]
-    seed_nppc = 4  # Number of particles per cell
-
-    # Grid and time step setup
-    lambda_De = np.sqrt(
-        constants.ep0 * constants.kb * elec_temp / (1.5e17 * constants.q_e**2)
-    )
-    omega_p = np.sqrt(1.5e17 * constants.q_e**2 / (constants.ep0 * constants.m_e))
-    dz = lambda_De / 2  # Approximate cell size
-    nz = int(zmax / dz)  # Number of cells
-    dz = zmax / nz  # True cell size [m]
-    dt = 1.0 / (5 * omega_p)  # [s]
-    max_electron_velocity = np.sqrt(2 * 20 * constants.q_e / constants.m_e)  # [m/s]
-    # If the time step is too large, the electron will go through the grid
-    # Fix this by changing the time step to be the grid size divided by the maximum electron velocity
-    if dz < max_electron_velocity * dt:
-        dt = dz / max_electron_velocity
+    # ---------------------------------------------------------------
+    # Diagnostic collection parameters
+    # ---------------------------------------------------------------
 
     # Run time
-    convergence_time = 30 / freq  # Convergence time
-    diag_time = 15 / freq  # Time of diagnostic evaluation
-
-    collect_every_n_steps = 10  # Collect diagnostics every n steps
+    convergence_time = 30 / freq    # Convergence time
+    diag_time = 15 / freq           # Time of diagnostic evaluation
+    collect_every_n_steps = 10      # Collect diagnostics every n steps
 
     # Total simulation time in seconds
     total_time = convergence_time + diag_time
 
+    # ---------------------------------------------------------------
+    # Simulation parameters
+    # ---------------------------------------------------------------
+    zmin = 0                        # m
+    zmax = 20 * milli               # m
+
+    elec_temp = 2.5 * eV_in_K       # [eV]
+    ion_temp = 300                  # [K]
+
+    gas_temp = 300                  # [K]
+    gas_pressure = 5 * milli        # [Torr]
+    gas_density = 133.32 * gas_pressure / gas_temp / constants.kb
+    m_ion = 6.634e-26               # [kg]
+    m_gas = m_ion                   # [kg]
+
+    # ---------------------------------------------------------------
+    # Grid and time step check
+    # ---------------------------------------------------------------
+    target_density = 1e17           # [m^-3], target density for baseline PIC stability
+    target_energy = 5               # [eV], target energy for baseline PIC stability
+
+    lambda_De = np.sqrt(
+        constants.ep0 * constants.kb * target_energy / (target_density * constants.q_e**2)
+    )
+    omega_p = np.sqrt(target_density * constants.q_e**2 / (constants.ep0 * constants.m_e))
+
+    if dz > lambda_De:
+        raise ValueError(
+            f"Cell size dz={dz:.2e} m is too large for the Debye length lambda_De={lambda_De:.2e} m. Please reduce dz."
+        )
+    else:
+        nz = int(zmax / dz)
+        dz = zmax / nz
+    if dt > 1.0 / (5 * omega_p):
+        raise ValueError(
+            f"Time step dt={dt:.2e} s is too large for the target plasma frequency omega_p={omega_p:.2e} Hz. Please reduce dt, or modify the plasma frequency."
+        )
+
     def __init__(self, verbose=False, diag_outfolder="./diags"):
-        """Get input parameters for the specific case (n) desired."""
+        """Setup the simulation."""
         # Control verbose (-v) flag output
         self.verbose = verbose
 
@@ -146,7 +164,7 @@ class CapacitiveDischargeExample(object):
         #######################################################################
 
         cross_sec_direc = (
-            "/scratch/gpfs/DGRAVES/bj8080/warpx-data/MCC_cross_sections/Ar/"
+            "/scratch/network/bj8080/warpx-data/MCC_cross_sections/Ar/"
         )
         electron_colls = picmi.MCCCollisions(
             name="coll_elec",
@@ -231,12 +249,36 @@ class CapacitiveDischargeExample(object):
         self.sim.add_icp_heating(self.icp_heating)
 
         #######################################################################
-        # Add diagnostics                                                     #
+        # Initialize                                                          #
         #######################################################################
-
         # Initialize everything
         self.sim.initialize_inputs()
         self.sim.initialize_warpx()
+
+        # Save cell size and time step for diagnostic
+        with open(os.path.join(self.diag_outfolder, "run_parameters.txt"), "w") as f:
+            f.write(f"dz = {self.dz:.2e} m\n")
+            f.write(f"dt = {self.dt:.2e} s\n")
+
+        # Save the nodes for diagnostics
+        np.save(os.path.join(self.diag_outfolder, "z_nodes.npy"), np.linspace(self.zmin, self.zmax, self.nz + 1))
+
+        # Precompute and save the diagnostic collection steps
+        time_bw_diagnostic = self.collect_every_n_steps * self.dt
+        collection_times = np.arange(
+            self.convergence_time, self.total_time,
+            time_bw_diagnostic,
+        )
+        np.save(os.path.join(self.diag_outfolder, "collection_times.npy"), collection_times)
+
+        #######################################################################
+        # Add diagnostics                                                     #
+        #######################################################################
+        # To add another diagnostic, simply add another array
+        #     self.<diagnostic_name> = np.zeros((self.collection_steps, self.nz + 1))
+        # and then implement a save_<diagnostic_name> function that fills in the array
+        #     def save_<diagnostic_name>(self, step):
+        # then add the call to save the diagnostic in the do_diagnostics function.
 
         # Set up diagnostics
         self.convergence_steps = int(self.convergence_time / self.dt)

@@ -1,0 +1,22 @@
+#!/bin/bash
+#SBATCH -J sample_ICP_job
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=24
+#SBATCH --time=01:00:00
+#SBATCH --mem-per-cpu=3G
+#SBATCH --output warpx.%j.out
+
+# setup environment
+module purge
+module load /home/bj8080/Modules/modulefiles/warpx_icp_stabilization/1.0
+
+RUNFILE="inputs.py"
+OUTFILE="diags"
+
+# copy the input file to the directory diags
+mkdir -p "$OUTFILE"
+cp "$RUNFILE" "$OUTFILE"
+
+# run program
+mpirun -n 24 python "$RUNFILE" -d "$OUTFILE"
