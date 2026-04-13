@@ -29,23 +29,23 @@ class CapacitiveDischargeExample(object):
     dz = 2.e-5                      # Cell size, will be checked against Debye length
     dt = 1e-11                      # Time step, will be calculated based on plasma frequency and grid size
     plasma_density = 5e15           # [m^-3]
-    seed_nppc = 4                   # Number of particles per cell (only loosely related to stability)
+    seed_nppc = 16                  # Number of particles per cell (only loosely related to stability)
 
     # ICP heating parameters
     freq = 10e6                     # Hz, ICP frequency
-    ICP_mag = 250.0                 # A/m^2, ICP current density amplitude
+    ICP_mag = 500.0                 # A/m^2, ICP current density amplitude
     zmin_icp = 5 * milli            # m, ICP region minimum z
     zmax_icp = 15 * milli           # m, ICP region maximum z
-    integrator = "euler"            # euler | ab2 | rk2 | rk4
+    integrator = "rk2"              # euler | ab2 | rk2 | rk4
 
     # ---------------------------------------------------------------
     # Diagnostic collection parameters
     # ---------------------------------------------------------------
 
     # Run time
-    convergence_time = 30 / freq    # Convergence time
-    diag_time = 15 / freq           # Time of diagnostic evaluation
-    collect_every_n_steps = 10      # Collect diagnostics every n steps
+    convergence_time = 10 / freq    # Convergence time
+    diag_time = 20 / freq           # Time of diagnostic evaluation
+    collect_every_n_steps = 400      # Collect diagnostics every n steps
 
     # Total simulation time in seconds
     total_time = convergence_time + diag_time
@@ -69,24 +69,12 @@ class CapacitiveDischargeExample(object):
     # Grid and time step check
     # ---------------------------------------------------------------
     target_density = 1e17           # [m^-3], target density for baseline PIC stability
-    target_energy = 5               # [eV], target energy for baseline PIC stability
+    target_energy = 5 * eV_in_K     # [eV], target energy for baseline PIC stability
 
     lambda_De = np.sqrt(
         constants.ep0 * constants.kb * target_energy / (target_density * constants.q_e**2)
     )
     omega_p = np.sqrt(target_density * constants.q_e**2 / (constants.ep0 * constants.m_e))
-
-    if dz > lambda_De:
-        raise ValueError(
-            f"Cell size dz={dz:.2e} m is too large for the Debye length lambda_De={lambda_De:.2e} m. Please reduce dz."
-        )
-    else:
-        nz = int(zmax / dz)
-        dz = zmax / nz
-    if dt > 1.0 / (5 * omega_p):
-        raise ValueError(
-            f"Time step dt={dt:.2e} s is too large for the target plasma frequency omega_p={omega_p:.2e} Hz. Please reduce dt, or modify the plasma frequency."
-        )
 
     def __init__(self, verbose=False, diag_outfolder="./diags"):
         """Setup the simulation."""
@@ -95,6 +83,18 @@ class CapacitiveDischargeExample(object):
 
         # Output folder for diagnostics (-d flag)
         self.diag_outfolder = os.path.abspath(diag_outfolder)
+
+        if self.dz > self.lambda_De:
+            raise ValueError(
+                f"Cell size dz={self.dz:.2e} m is too large for the Debye length lambda_De={self.lambda_De:.2e} m. Please reduce dz."
+            )
+        else:
+            self.nz = int(self.zmax / self.dz)
+            self.dz = self.zmax / self.nz
+        if self.dt > 1.0 / (5 * self.omega_p):
+            raise ValueError(
+                f"Time step dt={self.dt:.2e} s is too large for the target plasma frequency omega_p={self.omega_p:.2e} Hz. Please reduce dt, or modify the plasma frequency."
+            )
 
         self.convergence_steps = int(self.convergence_time / self.dt)
         self.max_steps = int(self.total_time / self.dt)
@@ -264,10 +264,11 @@ class CapacitiveDischargeExample(object):
         np.save(os.path.join(self.diag_outfolder, "z_nodes.npy"), np.linspace(self.zmin, self.zmax, self.nz + 1))
 
         # Precompute and save the diagnostic collection steps
-        time_bw_diagnostic = self.collect_every_n_steps * self.dt
-        collection_times = np.arange(
+        # time_bw_diagnostic = self.collect_every_n_steps * self.dt
+        collection_times = np.linspace(
             self.convergence_time, self.total_time,
-            time_bw_diagnostic,
+            self.collection_steps,
+            endpoint=False
         )
         np.save(os.path.join(self.diag_outfolder, "collection_times.npy"), collection_times)
 
@@ -301,15 +302,16 @@ class CapacitiveDischargeExample(object):
 
     def do_diagnostics(self):
         """Callback function to save diagnostics during the simulation."""
-        step = self.sim.extension.warpx.getistep(lev=0)
+        step = self.sim.extension.warpx.getistep(lev=0) - 1
 
         if step < self.convergence_steps:
             return
         elif (step - self.convergence_steps) % self.collect_every_n_steps != 0:
             return
+        step_index = (step - self.convergence_steps) // self.collect_every_n_steps
 
-        self.save_Ne(step)
-        self.save_Ey(step)
+        self.save_Ne(step_index)
+        self.save_Ey(step_index)
 
     #######################################################################
     # Run Simulation                                                      #
@@ -320,8 +322,8 @@ class CapacitiveDischargeExample(object):
         elapsed_steps = 0
 
         # Run until convergence
-        self.sim.step(self.convergence_steps - elapsed_steps - 1)
-        elapsed_steps = self.convergence_steps - 1
+        self.sim.step(self.convergence_steps - elapsed_steps)
+        elapsed_steps = self.convergence_steps
 
         callbacks.installafterstep(self.do_diagnostics)
 

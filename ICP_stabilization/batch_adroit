@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
-#SBATCH --time=01:00:00
+#SBATCH --time=00:30:00
 #SBATCH --mem-per-cpu=3G
 #SBATCH --output warpx.%j.out
 
@@ -11,10 +11,11 @@
 module purge
 module load /home/bj8080/Modules/modulefiles/warpx_icp_stabilization/1.0
 
+# Name the input file and output directory
 RUNFILE="inputs.py"
 OUTFILE="diags"
 
-# copy the input file to the directory diags
+# copy the input file to the output directory
 mkdir -p "$OUTFILE"
 cp "$RUNFILE" "$OUTFILE"
 
