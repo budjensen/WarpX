@@ -443,10 +443,19 @@ class CapacitiveDischargeExample(object):
         self.save_Jcond_y(step_index)
 
         if self.early_exit:
-            # Save all diagnostics up to the current step
+            # J_disp_y[step_index] won't be filled by the centered difference
+            # (that requires E_y(n+1) and runs on the next callback).  Fill it
+            # now with a backward difference using the values already in the
+            # rolling buffer: eps0*(E_y(n) - E_y(n-1))/dt.
+            self.J_disp_y[step_index] = (
+                constants.ep0 * (self.Ey_one_ago - self.Ey_two_ago) / self.dt
+            )
             if comm.rank == 0:
                 self.write_diagnostics(early_exit=True, step_index=step_index)
-            sys.exit(0)
+            # Barrier ensures rank 0 finishes writing before any rank exits.
+            # os._exit bypasses Python exception handling so WarpX cannot catch it.
+            comm.Barrier()
+            os._exit(0)
 
     def write_diagnostics(self, early_exit=False, step_index=None):
         """Save diagnostics to file."""

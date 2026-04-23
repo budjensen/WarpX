@@ -20,15 +20,17 @@ mkdir -p "$OUTFILE"
 cp "$RUNFILE" "$OUTFILE"
 cp "$0" "$OUTFILE"
 
-# run program with settings set on the command line
-mpirun -n 24 python "$RUNFILE" -d "$OUTFILE" \
-    --dz 2.e-5 \                        # Cell size
-    --dt 1e-11 \                        # Time step
-    --ICP_mag 500. \                    # ICP current source strength [A/m^2]
-    --ICP_freq 10e6 \                   # ICP source frequency
-    --Nppc 30 \                         # Number of particles per cell, should be high enough to reduce noise but low enough to be computationally feasible
-    --initial_density 1e16 \            # Initial plasma density [m^-3], should be near the expected final density
-    --convergence_periods 100. \        # Number of ICP periods in the convergence window
-    --diagnostic_periods 20. \          # Number of ICP periods in the diagnostic window
-    --collections_per_period 25 \       # Number of collection steps per ICP period in the diagnostic window
-    --solver euler                      # euler, rk2, rk4, ab2
+# Set parameters and run simulation
+ARGS=( # Note: Bash arrays support inline comments, unlike backslash-continued commands we had before
+    --dz 2.e-5                      # Cell size
+    --dt 5e-12                      # Time step
+    --ICP_mag 300.                  # ICP current source strength [A/m^2]
+    --ICP_freq 10e6                 # ICP source frequency
+    --Nppc 20                       # Number of particles per cell
+    --initial_density 5e15          # Initial plasma density [m^-3], should be near the expected final density
+    --convergence_periods 0.      # Number of ICP periods in the convergence window
+    --diagnostic_periods 20.        # Number of ICP periods in the diagnostic window
+    --collections_per_period 25     # Number of collection steps per ICP period
+    --solver rk4                    # euler, rk2, rk4, ab2
+)
+mpirun -n 24 python "$RUNFILE" -d "$OUTFILE" "${ARGS[@]}"
