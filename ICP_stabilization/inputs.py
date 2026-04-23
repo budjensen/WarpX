@@ -20,32 +20,74 @@ pico = 1e-12
 
 eV_in_K = 11605.41586
 
+# Set up argument parsing for simulation parameters,
+# so that we can modify the simulation from the command
+# line without changing the input script.
+parser = argparse.ArgumentParser()
+parser.add_argument('-v', '--verbose', help='Verbose run, default = False', action='store_true')
+parser.add_argument('-d', '--diag_outfolder', type=str, default='diags',
+                    help='Output folder for diagnostics, default = diags')
+parser.add_argument('--dz', type=float, default=2.e-5,
+                    help='Cell size, default = 2.e-5')
+parser.add_argument('--dt', type=float, default=1e-11,
+                    help='Time step, default = 1e-11')
+parser.add_argument('--ICP_mag', type=float, default=500.,
+                    help='ICP current density amplitude [A/m^2], default = 500.')
+parser.add_argument('--ICP_freq', type=float, default=10e6,
+                    help='ICP frequency [Hz], default = 10e6.')
+parser.add_argument('--Nppc', type=int, default=30,
+                    help='Number of particles per cell, default = 30')
+parser.add_argument('--initial_density', type=float, default=1e16,
+                    help='Initial plasma density [m^-3], default = 1e16')
+parser.add_argument('--convergence_periods', type=float, default=100.,
+                    help='Convergence time in RF periods, default = 100.')
+parser.add_argument('--diagnostic_periods', type=float, default=20.,
+                    help='Diagnostic evaluation time in RF periods, default = 20.')
+parser.add_argument('--steps_bw_diagnostics', type=int, default=400,
+                    help='Number of steps between diagnostic collection, default = 400')
+parser.add_argument('--solver', type=str, default='euler',
+                    help='ICP integrator: rk2, rk4, euler, ab2 (default: euler)')
+args, left = parser.parse_known_args()
+sys.argv = sys.argv[:1] + left  # keep other libs able to parse remaining args
+
+parameters = {
+    'dz': args.dz,
+    'dt': args.dt,
+    'solver': args.solver,
+    'ICP_mag': args.ICP_mag,
+    'ICP_freq': args.ICP_freq,
+    'Nppc': args.Nppc,
+    'N0': args.initial_density,
+    'convergence_periods': args.convergence_periods,
+    'diagnostic_periods': args.diagnostic_periods,
+    'steps_bw_diagnostics': args.steps_bw_diagnostics
+}
 
 class CapacitiveDischargeExample(object):
 
     # ---------------------------------------------------------------
     # Stability related parameters
     # ---------------------------------------------------------------
-    dz = 2.e-5                      # Cell size, will be checked against Debye length
-    dt = 1e-11                      # Time step, will be calculated based on plasma frequency and grid size
-    plasma_density = 5e15           # [m^-3]
-    seed_nppc = 16                  # Number of particles per cell (only loosely related to stability)
+    dz = parameters['dz']               # Cell size, will be checked against Debye length
+    dt = parameters['dt']               # Time step, will be calculated based on plasma frequency and grid size
+    plasma_density = parameters['N0']               # [m^-3]
+    seed_nppc = parameters['Nppc']      # Number of particles per cell (only loosely related to stability)
 
     # ICP heating parameters
-    freq = 10e6                     # Hz, ICP frequency
-    ICP_mag = 500.0                 # A/m^2, ICP current density amplitude
-    zmin_icp = 5 * milli            # m, ICP region minimum z
-    zmax_icp = 15 * milli           # m, ICP region maximum z
-    integrator = "euler"              # euler | ab2 | rk2 | rk4
+    freq = parameters['ICP_freq']         # Hz, ICP frequency
+    ICP_mag = parameters['ICP_mag']          # A/m^2, ICP current density amplitude
+    zmin_icp = 5 * milli                # m, ICP region minimum z
+    zmax_icp = 15 * milli               # m, ICP region maximum z
+    integrator = parameters['solver']   # euler | ab2 | rk2 | rk4
 
     # ---------------------------------------------------------------
     # Diagnostic collection parameters
     # ---------------------------------------------------------------
 
     # Run time
-    convergence_time = 0 / freq    # Convergence time
-    diag_time = 20 / freq           # Time of diagnostic evaluation
-    collect_every_n_steps = 400      # Collect diagnostics every n steps
+    convergence_time = parameters['convergence_periods'] / freq    # Convergence time
+    diag_time = parameters['diagnostic_periods'] / freq           # Time of diagnostic evaluation
+    collect_every_n_steps = parameters['steps_bw_diagnostics']      # Collect diagnostics every n steps
 
     # Total simulation time in seconds
     total_time = convergence_time + diag_time
@@ -458,20 +500,6 @@ class CapacitiveDischargeExample(object):
 ##########################
 ### Execute Simulation ###
 ##########################
-parser = argparse.ArgumentParser()
-parser.add_argument(
-    "-v", "--verbose", help="Verbose run, default = False", action="store_true"
-)
-parser.add_argument(
-    "-d",
-    "--diag_outfolder",
-    type=str,
-    default="diags",
-    help="Output folder for diagnostics, default = diags",
-)
-args, left = parser.parse_known_args()
-sys.argv = sys.argv[:1] + left  # keep other libs able to parse remaining args
-
 # normalize and ensure directory exists
 diag_out = os.path.abspath(args.diag_outfolder)
 os.makedirs(diag_out, exist_ok=True)
