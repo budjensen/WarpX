@@ -35,9 +35,9 @@ mpirun -n 24 python "$RUNFILE" -d "$OUTFILE" \
     --ICP_freq 10e6 \                   # ICP source frequency
     --Nppc 30 \                         # Number of particles per cell, should be high enough to reduce noise but low enough to be computationally feasible
     --initial_density 1e16 \            # Initial plasma density [m^-3], should be near the expected final density
-    --convergence_periods 100. \        # Number of RF periods to run before saving diagnostics
-    --diagnostic_periods 20. \          # Number of RF periods to collect diagnostics over
-    --steps_bw_diagnostics 400 \        # Number of steps between each diagnostics collection
+    --convergence_periods 100. \        # Number of ICP periods in the convergence window
+    --diagnostic_periods 20. \          # Number of ICP periods in the diagnostic window
+    --collections_per_period 25 \       # Number of collection steps per ICP period in the diagnostic window
     --solver euler                      # euler, rk2, rk4, ab2
 ```
 

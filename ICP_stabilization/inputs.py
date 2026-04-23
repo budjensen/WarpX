@@ -40,11 +40,11 @@ parser.add_argument('--Nppc', type=int, default=30,
 parser.add_argument('--initial_density', type=float, default=1e16,
                     help='Initial plasma density [m^-3], default = 1e16')
 parser.add_argument('--convergence_periods', type=float, default=100.,
-                    help='Convergence time in RF periods, default = 100.')
+                    help='Convergence time in ICP periods, default = 100.')
 parser.add_argument('--diagnostic_periods', type=float, default=20.,
-                    help='Diagnostic evaluation time in RF periods, default = 20.')
-parser.add_argument('--steps_bw_diagnostics', type=int, default=400,
-                    help='Number of steps between diagnostic collection, default = 400')
+                    help='Diagnostic evaluation time in ICP periods, default = 20.')
+parser.add_argument('--collections_per_period', type=int, default=25,
+                    help='Number of diagnostic steps per ICP period, default = 25')
 parser.add_argument('--solver', type=str, default='euler',
                     help='ICP integrator: rk2, rk4, euler, ab2 (default: euler)')
 args, left = parser.parse_known_args()
@@ -60,7 +60,7 @@ parameters = {
     'N0': args.initial_density,
     'convergence_periods': args.convergence_periods,
     'diagnostic_periods': args.diagnostic_periods,
-    'steps_bw_diagnostics': args.steps_bw_diagnostics
+    'collections_per_period': args.collections_per_period
 }
 
 class CapacitiveDischargeExample(object):
@@ -70,12 +70,12 @@ class CapacitiveDischargeExample(object):
     # ---------------------------------------------------------------
     dz = parameters['dz']               # Cell size, will be checked against Debye length
     dt = parameters['dt']               # Time step, will be calculated based on plasma frequency and grid size
-    plasma_density = parameters['N0']               # [m^-3]
+    plasma_density = parameters['N0']   # [m^-3]
     seed_nppc = parameters['Nppc']      # Number of particles per cell (only loosely related to stability)
 
     # ICP heating parameters
-    freq = parameters['ICP_freq']         # Hz, ICP frequency
-    ICP_mag = parameters['ICP_mag']          # A/m^2, ICP current density amplitude
+    freq = parameters['ICP_freq']       # Hz, ICP frequency
+    ICP_mag = parameters['ICP_mag']     # A/m^2, ICP current density amplitude
     zmin_icp = 5 * milli                # m, ICP region minimum z
     zmax_icp = 15 * milli               # m, ICP region maximum z
     integrator = parameters['solver']   # euler | ab2 | rk2 | rk4
@@ -85,9 +85,12 @@ class CapacitiveDischargeExample(object):
     # ---------------------------------------------------------------
 
     # Run time
-    convergence_time = parameters['convergence_periods'] / freq    # Convergence time
-    diag_time = parameters['diagnostic_periods'] / freq           # Time of diagnostic evaluation
-    collect_every_n_steps = parameters['steps_bw_diagnostics']      # Collect diagnostics every n steps
+    convergence_time = parameters['convergence_periods'] / freq                 # Convergence time
+    diag_time = parameters['diagnostic_periods'] / freq                         # Time of diagnostic evaluation
+
+    collections_per_period = parameters['collections_per_period']               # Number of diagnostic steps per ICP period
+    steps_per_period = int(1.0 / (freq * dt))                                   # Number of steps in one ICP period
+    collect_every_n_steps = int(steps_per_period // collections_per_period)     # Collect diagnostics every n steps
 
     # Total simulation time in seconds
     total_time = convergence_time + diag_time
