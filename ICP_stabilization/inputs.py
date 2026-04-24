@@ -352,7 +352,8 @@ class CapacitiveDischargeExample(object):
 
     def save_Ey(self, step_idx):
         """Save electric field diagnostic."""
-        self.E_y[step_idx] = self.Ey_wrapper[...]
+        # Before entering this function, we will have saved E_y at the current step in self.Ey_one_ago
+        self.E_y[step_idx] = self.Ey_one_ago
 
     def save_Jcond_y(self, step_index):
         """Save total particle conduction current density in the y direction in the ICP region."""
@@ -409,30 +410,35 @@ class CapacitiveDischargeExample(object):
     def do_diagnostics(self):
         """Callback function to save diagnostics during the simulation."""
         step = self.sim.extension.warpx.getistep(lev=0) - 1
+        N = self.collect_every_n_steps
+        rel = step - self.convergence_steps
+
+        # Only copy E_y from C++ to Python when nencessary
+        is_post_diag = rel >= 1 and (rel - 1) % N == 0
+        is_diag      = rel % N == 0
+        is_pre_diag  = (rel + 1) % N == 0
+
+        if not (is_post_diag or is_diag or is_pre_diag):
+            return
+
         current_Ey = np.copy(self.Ey_wrapper[...])
 
-        # Compute displacement current for the previous step using a centered
-        # finite difference: J_disp(n) = eps0 * (E_y(n+1) - E_y(n-1)) / (2*dt).
-        # When the callback fires at step s, E_y(s) is available as current_Ey and
-        # E_y(s-2) is in self.Ey_two_ago so we fill the diagnostic for step s-1 = n.
-        prev_step = step - 1
-        if (prev_step >= self.convergence_steps and
-                (prev_step - self.convergence_steps) % self.collect_every_n_steps == 0):
-            diag_idx = (prev_step - self.convergence_steps) // self.collect_every_n_steps
+        # J_disp(n) = eps0*(E_y(n+1) - E_y(n-1))/(2*dt).
+        # At the post-diagnostic step: current_Ey = E_y(n+1), Ey_two_ago = E_y(n-1).
+        if is_post_diag:
+            diag_idx = (rel - 1) // N
             if diag_idx < self.collection_steps:
                 self.J_disp_y[diag_idx] = (
                     constants.ep0 * (current_Ey - self.Ey_two_ago) / (2.0 * self.dt)
                 )
 
-        # Shift the rolling E_y buffer for the next step
+        # Shift the rolling E_y buffer
         self.Ey_two_ago = self.Ey_one_ago
         self.Ey_one_ago = current_Ey
 
-        if step < self.convergence_steps:
+        if not is_diag:
             return
-        elif (step - self.convergence_steps) % self.collect_every_n_steps != 0:
-            return
-        step_index = (step - self.convergence_steps) // self.collect_every_n_steps
+        step_index = rel // N
         if step_index >= self.collection_steps:
             return
 
@@ -455,7 +461,8 @@ class CapacitiveDischargeExample(object):
             # Barrier ensures rank 0 finishes writing before any rank exits.
             # os._exit bypasses Python exception handling so WarpX cannot catch it.
             comm.Barrier()
-            os._exit(0)
+            self.sim.finalize() # This will print out the tinyprofiler, for timing information, before the simulation exits.
+            sys.exit(0) # This intentionally raises an error on the python side to end the simualtion immediately.
 
     def write_diagnostics(self, early_exit=False, step_index=None):
         """Save diagnostics to file."""
