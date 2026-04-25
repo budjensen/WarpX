@@ -146,6 +146,7 @@ class CapacitiveDischargeExample(object):
         # the displacement-current buffer can be seeded from a real field state.
         if self.convergence_steps == 0:
             self.convergence_steps = 1
+            self.convergence_time = self.convergence_steps * self.dt
         self.max_steps = int(self.total_time / self.dt)
         self.collection_steps = (
             self.max_steps - self.convergence_steps
@@ -306,22 +307,13 @@ class CapacitiveDischargeExample(object):
 
         # Save cell size and time step for diagnostic
         with open(os.path.join(self.diag_outfolder, "run_parameters.txt"), "w") as f:
-            f.write(f"dz = {self.dz:.2e} m\n")
-            f.write(f"dt = {self.dt:.2e} s\n")
-            f.write(f"icp_zmin = {self.zmin_icp:.2e} m\n")
-            f.write(f"icp_zmax = {self.zmax_icp:.2e} m\n")
+            f.write(f"icp_zmin = {self.zmin_icp:.3e} m\n")
+            f.write(f"icp_zmax = {self.zmax_icp:.3e} m\n")
+            for param, name in parameters.items():
+                f.write(f"{param} = {name}\n")
 
         # Save the nodes for diagnostics
         np.save(os.path.join(self.diag_outfolder, "z_nodes.npy"), np.linspace(self.zmin, self.zmax, self.nz + 1))
-
-        # Precompute and save the diagnostic collection steps
-        # time_bw_diagnostic = self.collect_every_n_steps * self.dt
-        self.collection_times = np.linspace(
-            self.convergence_time, self.total_time,
-            self.collection_steps,
-            endpoint=False
-        )
-        np.save(os.path.join(self.diag_outfolder, "collection_times.npy"), self.collection_times)
 
         #######################################################################
         # Add diagnostics                                                     #
@@ -333,6 +325,7 @@ class CapacitiveDischargeExample(object):
         # then add the call to save the diagnostic in the do_diagnostics function.
 
         # Add custom diagnostic arrays
+        self.collection_times = np.zeros(self.collection_steps)
         self.N_e = np.zeros((self.collection_steps, self.nz + 1))
         self.E_y = np.zeros((self.collection_steps, self.nz + 1))
         self.J_disp_y = np.zeros((self.collection_steps, self.nz + 1))
@@ -444,6 +437,7 @@ class CapacitiveDischargeExample(object):
 
         self.sim.extension.warpx.synchronize_velocity_with_position()
 
+        self.collection_times[step_index] = self.sim.extension.warpx.gett_new(lev=0)
         self.save_Ne(step_index)
         self.save_Ey(step_index)
         self.save_Jcond_y(step_index)
@@ -472,6 +466,7 @@ class CapacitiveDischargeExample(object):
             np.save(os.path.join(self.diag_outfolder, "E_y.npy"), self.E_y[save_slice])
             np.save(os.path.join(self.diag_outfolder, "J_disp_y.npy"), self.J_disp_y[save_slice])
             np.save(os.path.join(self.diag_outfolder, "J_cond_y.npy"), self.J_cond_y[save_slice])
+            np.save(os.path.join(self.diag_outfolder, "collection_times.npy"), self.collection_times[save_slice])
 
             # Write total current density (displacement + conduction) in the ICP region to file for easier analysis
             top_icp_idx = len(self.J_disp_y[0]) - 1 - np.argmax(np.abs(self.J_disp_y[0][::-1]) > 0.)
@@ -484,7 +479,6 @@ class CapacitiveDischargeExample(object):
             np.save(os.path.join(self.diag_outfolder, "J_total_y.npy"), J_total)
 
             if early_exit:
-                np.save(os.path.join(self.diag_outfolder, "collection_times.npy"), self.collection_times[save_slice])
                 print(f"Early exit at diagnostic index {step_index} due to zero conduction current density. All diagnostics up to this point have been saved.")
 
     #######################################################################
@@ -501,9 +495,9 @@ class CapacitiveDischargeExample(object):
         # first diagnostic.
         if self.convergence_steps > 1:
             self.sim.step(self.convergence_steps - 1)
+        self.sim.step(1)
         self.Ey_one_ago = np.copy(self.Ey_wrapper[...])
         self.Ey_two_ago = None  # populated on the first callback iteration
-        self.sim.step(1)
 
         callbacks.installafterstep(self.do_diagnostics)
 
