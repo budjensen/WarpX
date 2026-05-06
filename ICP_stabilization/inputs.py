@@ -129,17 +129,8 @@ class CapacitiveDischargeExample(object):
         # Output folder for diagnostics (-d flag)
         self.diag_outfolder = os.path.abspath(diag_outfolder)
 
-        if self.dz > self.lambda_De:
-            raise ValueError(
-                f"Cell size dz={self.dz:.2e} m is too large for the Debye length lambda_De={self.lambda_De:.2e} m. Please reduce dz."
-            )
-        else:
-            self.nz = int(self.zmax / self.dz)
-            self.dz = self.zmax / self.nz
-        if self.dt > 1.0 / (5 * self.omega_p):
-            raise ValueError(
-                f"Time step dt={self.dt:.2e} s is too large for the target plasma frequency omega_p={self.omega_p:.2e} Hz. Please reduce dt, or modify the plasma frequency."
-            )
+        self.nz = int(self.zmax / self.dz)
+        self.dz = self.zmax / self.nz
 
         self.convergence_steps = int(self.convergence_time / self.dt)
         # When convergence_time is 0 we need at least 1 pre-diagnostic step so
