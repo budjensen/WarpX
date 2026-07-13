@@ -3070,11 +3070,22 @@ class ICPHeating(picmistandard.base._ClassWithInit):
 
     ey_max : float, optional
         Maximum allowed transverse electric field amplitude in V/m.
-        Acts as a stability limiter (default: 1e6 V/m).
+        Acts as a hard stability limiter (default: 1e6 V/m).
+
+    integrator : str, optional
+        Time integration scheme for the E_y ODE. Choices:
+
+        - ``"euler"`` — forward Euler, 1st order (default)
+        - ``"ab2"``   — Adams-Bashforth 2-step, 2nd order
+        - ``"rk2"``   — Heun's method (2-stage Runge-Kutta), 2nd order
+        - ``"rk4"``   — classic 4-stage Runge-Kutta, 4th order
+
+        Higher-order methods require intermediate particle pushes and are
+        more expensive per timestep but have larger stability regions.
 
     Examples
     --------
-    Basic constant current amplitude:
+    Basic constant current amplitude with default forward-Euler integrator:
 
     >>> from pywarpx import picmi
     >>> icp = picmi.ICPHeating(
@@ -3085,13 +3096,14 @@ class ICPHeating(picmistandard.base._ClassWithInit):
     ... )
     >>> sim.add_icp_heating(icp)
 
-    Spatially varying current using parser expression:
+    Spatially varying current with RK4 integrator for improved stability:
 
     >>> icp = picmi.ICPHeating(
     ...     frequency=13.56e6,
     ...     z_min=0.0,
     ...     z_max=0.01,
     ...     j0_amplitude="100.0 * exp(-(z-0.005)^2 / 0.001^2)",
+    ...     integrator="rk4",
     ... )
     >>> sim.add_icp_heating(icp)
 
@@ -3102,22 +3114,40 @@ class ICPHeating(picmistandard.base._ClassWithInit):
     ...     z_min=0.0,
     ...     z_max=0.005,
     ...     j0_amplitude="100.0 * (1 + 0.1*sin(2*pi*1e6*t))",
+    ...     integrator="rk2",
     ... )
     >>> sim.add_icp_heating(icp)
     """
 
-    def __init__(self, frequency, z_min, z_max, j0_amplitude, ey_max=1e6, **kw):
+    _valid_integrators = ("euler", "ab2", "rk2", "rk4")
+
+    def __init__(
+        self,
+        frequency,
+        z_min,
+        z_max,
+        j0_amplitude,
+        ey_max=1e6,
+        integrator="euler",
+        **kw,
+    ):
         self.frequency = frequency
         self.z_min = z_min
         self.z_max = z_max
         self.j0_amplitude = j0_amplitude
         self.ey_max = ey_max
+        self.integrator = integrator
 
         # Validate inputs
         if self.frequency <= 0:
             raise ValueError("frequency must be positive")
         if self.z_max <= self.z_min:
             raise ValueError("z_max must be greater than z_min")
+        if self.integrator not in self._valid_integrators:
+            raise ValueError(
+                f"integrator must be one of {self._valid_integrators}, "
+                f"got '{self.integrator}'"
+            )
 
         self.handle_init(kw)
 
@@ -3133,6 +3163,7 @@ class ICPHeating(picmistandard.base._ClassWithInit):
         pywarpx.icp_heating.z_min = self.z_min
         pywarpx.icp_heating.z_max = self.z_max
         pywarpx.icp_heating.ey_max = self.ey_max
+        pywarpx.icp_heating.integrator = self.integrator
 
         # Set j0 amplitude (can be float or string expression)
         if isinstance(self.j0_amplitude, str):
