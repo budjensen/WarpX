@@ -754,80 +754,17 @@ void BackgroundMCCCollision::doBackgroundIonization
 
         auto Transform = ImpactIonizationTransformFunc(
                                                        m_ionization_processes[0].getEnergyPenalty(),
-                                                       m_mass1, sqrt_kb_m, m_background_temperature_func, t,
-                                                       anisotropic_scatter, m_B_ioniz, xi_view
+                                                       m_mass1, m_background_mass, sqrt_kb_m,
+                                                       m_background_temperature_func, t,
+                                                       anisotropic_scatter, m_B_ioniz, xi_view,
+                                                       do_tracking, tracking_arr, ionization_comp_idx,
+                                                       plo, dxi
                                                        );
 
         const auto num_added = filterCopyTransformParticles<1>(species1, species2,
                                                                elec_tile, ion_tile, elec_tile, np_elec, np_ion,
                                                                Filter, CopyElec, CopyIon, Transform
                                                                );
-
-        // Track ionization collisions
-        if (do_tracking && num_added > 0) {
-            // For ionization tracking, we need to go through the particles that ionized
-            // This is approximate - we track based on the particles that were created
-            auto& soa_elec = elec_tile.GetStructOfArrays();
-
-            // Access the particle data arrays directly (dimension-dependent for positions)
-#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
-            const amrex::ParticleReal* AMREX_RESTRICT pos_x = soa_elec.GetRealData(PIdx::x).data();
-#endif
-#if defined(WARPX_DIM_3D)
-            const amrex::ParticleReal* AMREX_RESTRICT pos_y = soa_elec.GetRealData(PIdx::y).data();
-#endif
-#if defined(WARPX_ZINDEX)
-            const amrex::ParticleReal* AMREX_RESTRICT pos_z = soa_elec.GetRealData(PIdx::z).data();
-#endif
-            const amrex::ParticleReal* AMREX_RESTRICT w_arr = soa_elec.GetRealData(PIdx::w).data();
-            const amrex::ParticleReal* AMREX_RESTRICT ux_arr = soa_elec.GetRealData(PIdx::ux).data();
-            const amrex::ParticleReal* AMREX_RESTRICT uy_arr = soa_elec.GetRealData(PIdx::uy).data();
-            const amrex::ParticleReal* AMREX_RESTRICT uz_arr = soa_elec.GetRealData(PIdx::uz).data();
-
-            // Store particle mass and energy penalty for device access
-            auto const m = m_mass1;
-            auto const energy_penalty = m_ionization_processes[0].getEnergyPenalty();
-
-            // Track each newly created electron
-            amrex::ParallelFor(num_added, [=] AMREX_GPU_DEVICE (int ip) {
-                const int idx = np_elec + ip;
-
-                // Get particle position
-#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
-                const amrex::ParticleReal x = pos_x[idx];
-#else
-                const amrex::ParticleReal x = 0.0;
-#endif
-#if defined(WARPX_DIM_3D)
-                const amrex::ParticleReal y = pos_y[idx];
-#else
-                const amrex::ParticleReal y = 0.0;
-#endif
-#if defined(WARPX_ZINDEX)
-                const amrex::ParticleReal z = pos_z[idx];
-#else
-                const amrex::ParticleReal z = 0.0;
-#endif
-
-                // Calculate cell indices
-                int ii = 0, jj = 0, kk = 0;
-                getCellIndices(x, y, z, plo, dxi, ii, jj, kk);
-
-                // Get the particle weight and energy of the created electron (approximate energy transfer)
-                const amrex::Real weight = static_cast<amrex::Real>(w_arr[idx]);
-                const amrex::ParticleReal ux = ux_arr[idx];
-                const amrex::ParticleReal uy = uy_arr[idx];
-                const amrex::ParticleReal uz = uz_arr[idx];
-                const double E_electron = Algorithms::NonrelativisticKineticEnergy<double>(ux, uy, uz, m);
-                // Energy transfer is approximately the ionization energy + created electron energy
-                const double E_transfer = energy_penalty * PhysConst::q_e + E_electron;
-
-                // Track collision count and energy transfer (interleaved: count at 2*idx, energy at 2*idx+1)
-                amrex::Gpu::Atomic::AddNoRet(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx), weight);
-                amrex::Gpu::Atomic::AddNoRet(&tracking_arr(ii, jj, kk, 2*ionization_comp_idx + 1),
-                    weight * static_cast<amrex::Real>(E_transfer));
-            });
-        }
 
         setNewParticleIDs(elec_tile, np_elec, num_added);
         setNewParticleIDs(ion_tile, np_ion, num_added);

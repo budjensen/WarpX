@@ -14,6 +14,9 @@
 #include "Utils/ParticleUtils.H"
 #include "Utils/WarpXConst.H"
 
+#include <AMReX_Array.H>
+#include <AMReX_Array4.H>
+#include <AMReX_GpuAtomic.H>
 #include <AMReX_Random.H>
 #include <AMReX_REAL.H>
 
@@ -142,6 +145,8 @@ public:
     *
     * @param[in] energy_cost energy cost of ionization
     * @param[in] mass1 mass of the colliding species
+    * @param[in] mass2 mass of the background/ionized species (used for the
+                 emitted ion's kinetic energy when collision tracking is enabled)
     * @param[in] sqrt_kb_m value of sqrt(kB/m), where kB is Boltzmann's constant
                  and m is the background neutral mass
     * @param[in] T_a_func ParserExecutor<4> function to get the background
@@ -151,15 +156,27 @@ public:
     * @param[in] B_ioniz Vahedi energy partition parameter (eV).
     *            If B_ioniz <= 0, equal post-threshold energy split is used.
     * @param[in] xi_view collision-level xi(E) source for anisotropic scattering
+    * @param[in] do_tracking whether to accumulate collision tracking data
+    * @param[in] tracking_arr Array4 into which tracking data is accumulated
+                 (only dereferenced when do_tracking is true)
+    * @param[in] tracking_comp_idx the tracking component index for this
+                 ionization process (count is written to 2*tracking_comp_idx,
+                 energy to 2*tracking_comp_idx + 1)
+    * @param[in] plo lower corner of the problem domain (for cell index lookup)
+    * @param[in] dxi inverse cell size array (for cell index lookup)
     */
     ImpactIonizationTransformFunc(
-        amrex::ParticleReal energy_cost, double mass1, amrex::ParticleReal sqrt_kb_m,
+        amrex::ParticleReal energy_cost, double mass1, double mass2, amrex::ParticleReal sqrt_kb_m,
         amrex::ParserExecutor<4> const& T_a_func, amrex::Real t,
-        bool anisotropic_scatter, amrex::ParticleReal B_ioniz, MCCXiView xi_view
-    ) :  m_energy_cost(energy_cost), m_mass1(mass1),
+        bool anisotropic_scatter, amrex::ParticleReal B_ioniz, MCCXiView xi_view,
+        bool do_tracking, amrex::Array4<amrex::Real> const& tracking_arr, int tracking_comp_idx,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& plo,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& dxi
+    ) :  m_energy_cost(energy_cost), m_mass1(mass1), m_mass2(mass2),
          m_sqrt_kb_m(sqrt_kb_m), m_T_a_func(T_a_func), m_t(t),
          m_anisotropic_scatter(anisotropic_scatter), m_B_ioniz(B_ioniz),
-         m_xi_view(xi_view) { }
+         m_xi_view(xi_view), m_do_tracking(do_tracking), m_tracking_arr(tracking_arr),
+         m_tracking_comp_idx(tracking_comp_idx), m_plo(plo), m_dxi(dxi) { }
 
     /**
     * \brief Functor call. It determines the properties of the generated pair
@@ -278,16 +295,77 @@ public:
         i_ux = ion_vel_std * RandomNormal(0_prt, 1.0_prt, engine);
         i_uy = ion_vel_std * RandomNormal(0_prt, 1.0_prt, engine);
         i_uz = ion_vel_std * RandomNormal(0_prt, 1.0_prt, engine);
+
+        // Record the exact energy balance of the plasma species involved in
+        // this collision:
+        //   \Delta E = E_inc_elec_i - (E_inc_elec_f + E_emit_elec + E_emit_ion)
+        // This is not simply the ionization energy cost,
+        // since the emitted ion's energy is drawn from the
+        // background profile. As such, there is a small amount of
+        // "heating" as the ion is created.
+        if (m_do_tracking) {
+            const double E_inc0 = E_coll * eV;
+            const double E_inc1 = Algorithms::NonrelativisticKineticEnergy<double>(ux, uy, uz, m_mass1);
+            const double E_emit_elec = Algorithms::NonrelativisticKineticEnergy<double>(e_ux, e_uy, e_uz, m_mass1);
+            const double E_emit_ion = Algorithms::NonrelativisticKineticEnergy<double>(i_ux, i_uy, i_uz, m_mass2);
+            const double E_transfer = E_inc0 - E_inc1 - E_emit_elec - E_emit_ion;
+
+            int ii = 0, jj = 0, kk = 0;
+            getCellIndices(x, y, z, m_plo, m_dxi, ii, jj, kk);
+
+            const auto weight = static_cast<amrex::Real>(src.m_rdata[PIdx::w][i_src]);
+            amrex::Gpu::Atomic::AddNoRet(&m_tracking_arr(ii, jj, kk, 2*m_tracking_comp_idx), weight);
+            amrex::Gpu::Atomic::AddNoRet(&m_tracking_arr(ii, jj, kk, 2*m_tracking_comp_idx + 1),
+                weight * static_cast<amrex::Real>(E_transfer));
+        }
     }
 
 private:
+    /**
+     * \brief Calculate cell indices from particle position
+     *
+     * \param[in] x, y, z particle coordinates
+     * \param[in] plo lower corner of problem domain
+     * \param[in] dxi inverse cell size array
+     * \param[out] i, j, k cell indices
+     */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    static void getCellIndices(amrex::ParticleReal x, amrex::ParticleReal y, amrex::ParticleReal z,
+                               amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& plo,
+                               amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& dxi,
+                               int& i, int& j, int& k)
+    {
+#if defined(WARPX_DIM_1D_Z)
+        amrex::ignore_unused(x, y);
+        i = static_cast<int>((z - plo[0]) * dxi[0]);
+        j = 0;
+        k = 0;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+        amrex::ignore_unused(y);
+        i = static_cast<int>((x - plo[0]) * dxi[0]);
+        j = 0;
+        k = static_cast<int>((z - plo[1]) * dxi[1]);
+#else
+        i = static_cast<int>((x - plo[0]) * dxi[0]);
+        j = static_cast<int>((y - plo[1]) * dxi[1]);
+        k = static_cast<int>((z - plo[2]) * dxi[2]);
+#endif
+    }
+
     amrex::ParticleReal m_energy_cost;
     double m_mass1;
+    double m_mass2;
     amrex::ParticleReal m_sqrt_kb_m;
     amrex::ParserExecutor<4> m_T_a_func;
     amrex::Real m_t;
     bool m_anisotropic_scatter = false;
     amrex::ParticleReal m_B_ioniz = 0;
     MCCXiView m_xi_view;
+
+    bool m_do_tracking = false;
+    amrex::Array4<amrex::Real> m_tracking_arr;
+    int m_tracking_comp_idx = 0;
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_plo{};
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_dxi{};
 };
 #endif // WARPX_PARTICLES_COLLISION_IMPACT_IONIZATION_H_
