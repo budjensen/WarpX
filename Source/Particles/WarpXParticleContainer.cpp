@@ -2446,3 +2446,100 @@ WarpXParticleContainer::ApplyBoundaryConditions (){
         }
     }
 }
+
+void
+WarpXParticleContainer::InitializePowerDepositionTracking (
+    amrex::Vector<amrex::BoxArray> const& ba,
+    amrex::Vector<amrex::DistributionMapping> const& dm)
+{
+    constexpr int ncomps = 3; // Px, Py, Pz
+    bool const was_initialized = !m_power_deposition_tracking_mf.empty();
+
+    m_power_deposition_tracking_mf.resize(ba.size());
+    for (int lev = 0; lev < static_cast<int>(ba.size()); ++lev) {
+        auto& mf = m_power_deposition_tracking_mf[lev];
+        bool const matches = (mf != nullptr) &&
+            (mf->boxArray() == ba[lev]) && (mf->DistributionMap() == dm[lev]);
+        if (!matches) {
+            if (was_initialized) {
+                amrex::Print() << Utils::TextMsg::Info(
+                    "Power deposition tracking buffer for species id " +
+                    std::to_string(species_id) + " level " + std::to_string(lev) +
+                    " was reallocated (likely due to a regrid or load-balance event) "
+                    "and its accumulated data was reset to zero.");
+            }
+            mf = std::make_unique<amrex::MultiFab>(ba[lev], dm[lev], ncomps, 0);
+            mf->setVal(0.0);
+        }
+    }
+}
+
+amrex::MultiFab* WarpXParticleContainer::getPowerDepositionTracking (int lev)
+{
+    if (lev >= static_cast<int>(m_power_deposition_tracking_mf.size())) {
+        return nullptr;
+    }
+    return m_power_deposition_tracking_mf[lev].get();
+}
+
+void WarpXParticleContainer::resetPowerDepositionTracking (int lev)
+{
+    if (lev < static_cast<int>(m_power_deposition_tracking_mf.size()) &&
+        m_power_deposition_tracking_mf[lev]) {
+        m_power_deposition_tracking_mf[lev]->setVal(0.0);
+    }
+}
+
+void WarpXParticleContainer::gatherPowerDepositionTracking (
+    int lev, amrex::Vector<amrex::Real>& data, amrex::Box& box, int ngrow)
+{
+    data.clear();
+    box = amrex::Box();
+
+    if (lev >= static_cast<int>(m_power_deposition_tracking_mf.size()) ||
+        !m_power_deposition_tracking_mf[lev]) {
+        return;
+    }
+
+    auto* mf = m_power_deposition_tracking_mf[lev].get();
+    constexpr int ncomp = 3;
+    const int ioproc = amrex::ParallelDescriptor::IOProcessorNumber();
+
+    // Get the domain box for this level
+    const auto& geom = WarpX::GetInstance().Geom(lev);
+    amrex::Box domain = geom.Domain();
+    if (ngrow > 0) {
+        domain.grow(ngrow);
+    }
+
+    // Create a single-box BoxArray and DistributionMapping on IO processor
+    amrex::BoxArray ba_single(domain);
+    amrex::DistributionMapping dm_single;
+    amrex::Vector<int> pmap(1, ioproc);
+    dm_single.define(std::move(pmap));
+
+    // Create a MultiFab on the IO processor to gather data into
+    amrex::MultiFab mf_gathered(ba_single, dm_single, ncomp, 0);
+    mf_gathered.setVal(0.0);
+
+    // Copy from the distributed MultiFab to the gathered one
+    mf_gathered.ParallelCopy(*mf, 0, 0, ncomp);
+
+    // Only IO processor extracts the data
+    if (amrex::ParallelDescriptor::IOProcessor()) {
+        box = domain;
+        const amrex::Long ncells = domain.numPts();
+        data.resize(ncells * ncomp);
+
+        const amrex::Array4<const amrex::Real> arr = mf_gathered.array(0);
+        amrex::Long idx = 0;
+
+        // Iterate through the box in standard order and pack data
+        amrex::LoopOnCpu(domain, [&](int i, int j, int k) {
+            for (int comp = 0; comp < ncomp; ++comp) {
+                data[idx * ncomp + comp] = arr(i, j, k, comp);
+            }
+            idx++;
+        });
+    }
+}

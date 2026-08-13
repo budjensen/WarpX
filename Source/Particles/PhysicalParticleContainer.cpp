@@ -314,6 +314,9 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
 #endif
     }
 
+    // Enable per-cell, per-direction J.E power deposition tracking for this species
+    pp_species_name.query("enable_power_deposition_tracking", m_enable_power_deposition_tracking);
+
     // Read reflection models for absorbing boundaries; defaults to a zero
     pp_species_name.query("reflection_model_xlo(E)", m_boundary_conditions.reflection_model_xlo_str);
     pp_species_name.query("reflection_model_xhi(E)", m_boundary_conditions.reflection_model_xhi_str);
@@ -470,6 +473,17 @@ PhysicalParticleContainer::Evolve (ablastr::fields::MultiFabRegister& fields,
         (subcycling_half == SubcyclingHalf::None || subcycling_half == SubcyclingHalf::SecondHalf) &&
         (position_push_type == PositionPushType::Full || position_push_type == PositionPushType::SecondHalf)
     );
+
+    if (m_enable_power_deposition_tracking) {
+        auto const flvl = this->finestLevel();
+        amrex::Vector<amrex::BoxArray> tracking_ba(flvl+1);
+        amrex::Vector<amrex::DistributionMapping> tracking_dm(flvl+1);
+        for (int ilev = 0; ilev <= flvl; ++ilev) {
+            tracking_ba[ilev] = this->ParticleBoxArray(ilev);
+            tracking_dm[ilev] = this->ParticleDistributionMap(ilev);
+        }
+        InitializePowerDepositionTracking(tracking_ba, tracking_dm);
+    }
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel
@@ -1326,6 +1340,7 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
     ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr() + offset;
     ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr() + offset;
     ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr() + offset;
+    ParticleReal* const AMREX_RESTRICT wp_power = attribs[PIdx::w].dataPtr() + offset;
 
     CopyParticleAttribs copyAttribs;
     if (copy_particle_attribs) {
@@ -1384,6 +1399,19 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
     int qed_runtime_flag = no_qed;
 #endif
 
+    // Power deposition (J.E) tracking: only sample at the one call site per step
+    // where the momentum push (and the field gather that feeds it) actually happens,
+    // regardless of how the position push is split across PushPX calls.
+    amrex::MultiFab* power_mf = m_enable_power_deposition_tracking ?
+        getPowerDepositionTracking(lev) : nullptr;
+    const bool do_power_tracking = (power_mf != nullptr) &&
+        (momentum_push_type != MomentumPushType::None);
+    amrex::Array4<amrex::Real> power_arr;
+    if (do_power_tracking) { power_arr = power_mf->array(pti); }
+    const auto& power_tracking_geom = WarpX::GetInstance().Geom(lev);
+    const auto power_tracking_plo = power_tracking_geom.ProbLoArray();
+    const auto power_tracking_dxi = power_tracking_geom.InvCellSizeArray();
+
     // Loop over the particles and update their momentum.
     // Using this version of ParallelFor with compile time options
     // improves performance when qed or external EB are not used by reducing
@@ -1432,6 +1460,11 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
 
         scaleFields(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp);
 
+        amrex::ParticleReal ux_old_power = 0.0, uy_old_power = 0.0, uz_old_power = 0.0;
+        if (do_power_tracking) {
+            ux_old_power = ux[ip]; uy_old_power = uy[ip]; uz_old_power = uz[ip];
+        }
+
         if (copy_particle_attribs) {
             //  Copy the old x and u for the BTD
             copyAttribs(ip);
@@ -1466,6 +1499,33 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
                                       dt);
         }
 #endif
+
+        if (do_power_tracking) {
+            constexpr amrex::ParticleReal power_inv_c2 = 1.0/(PhysConst::c*PhysConst::c);
+            amrex::ParticleReal const u2_old = ux_old_power*ux_old_power
+                + uy_old_power*uy_old_power + uz_old_power*uz_old_power;
+            amrex::ParticleReal const inv_gamma_old = 1.0/std::sqrt(1.0 + u2_old*power_inv_c2);
+            amrex::ParticleReal const q_eff = q * static_cast<amrex::ParticleReal>(ion_lev ? ion_lev[ip] : 1);
+            amrex::Real const wt = static_cast<amrex::Real>(wp_power[ip]);
+
+            int pi = 0, pj = 0, pk = 0;
+#if defined(WARPX_DIM_1D_Z)
+            pi = static_cast<int>((zp - power_tracking_plo[0]) * power_tracking_dxi[0]);
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+            pi = static_cast<int>((xp - power_tracking_plo[0]) * power_tracking_dxi[0]);
+            pk = static_cast<int>((zp - power_tracking_plo[1]) * power_tracking_dxi[1]);
+#else
+            pi = static_cast<int>((xp - power_tracking_plo[0]) * power_tracking_dxi[0]);
+            pj = static_cast<int>((yp - power_tracking_plo[1]) * power_tracking_dxi[1]);
+            pk = static_cast<int>((zp - power_tracking_plo[2]) * power_tracking_dxi[2]);
+#endif
+            amrex::Gpu::Atomic::AddNoRet(&power_arr(pi,pj,pk,0),
+                wt*static_cast<amrex::Real>(q_eff*(ux_old_power*inv_gamma_old)*Exp));
+            amrex::Gpu::Atomic::AddNoRet(&power_arr(pi,pj,pk,1),
+                wt*static_cast<amrex::Real>(q_eff*(uy_old_power*inv_gamma_old)*Eyp));
+            amrex::Gpu::Atomic::AddNoRet(&power_arr(pi,pj,pk,2),
+                wt*static_cast<amrex::Real>(q_eff*(uz_old_power*inv_gamma_old)*Ezp));
+        }
 
         amrex::Real position_dt = dt;
         if (position_push_type == PositionPushType::FirstHalf || position_push_type == PositionPushType::SecondHalf) {

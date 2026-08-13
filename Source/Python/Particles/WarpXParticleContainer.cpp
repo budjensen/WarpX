@@ -8,6 +8,10 @@
 
 #include <Particles/WarpXParticleContainer.H>
 
+#include <AMReX_MultiFab.H>
+
+#include <pybind11/stl.h>
+
 
 void init_WarpXParIter (py::module& m)
 {
@@ -152,6 +156,86 @@ void init_WarpXParticleContainer (py::module& m)
         .def("set_do_not_deposit",
             [](WarpXParticleContainer& pc, int flag) { pc.setDoNotDeposit(flag); },
             py::arg("flag")
+        )
+        .def("get_power_deposition_tracking",
+            &WarpXParticleContainer::getPowerDepositionTracking,
+            py::arg("lev"),
+            py::return_value_policy::reference_internal,
+            R"doc(Get power deposition tracking MultiFab for a given refinement level.
+
+            The MultiFab has cell-by-cell resolution with 3 components, the
+            J.E power deposited into this species per cell, per direction:
+            [Px, Py, Pz]. Values are sampled at the exact velocity and field
+            values used in the particle's momentum push.
+
+            Parameters
+            ----------
+            lev : int
+                Refinement level (0 for base level)
+
+            Returns
+            -------
+            amrex.MultiFab or None
+                The power deposition tracking MultiFab, or None if tracking
+                is not enabled for this species (see the species'
+                ``enable_power_deposition_tracking`` flag)
+            )doc"
+        )
+        .def("reset_power_deposition_tracking",
+            &WarpXParticleContainer::resetPowerDepositionTracking,
+            py::arg("lev"),
+            R"doc(Reset power deposition tracking data (zero all cells) for a given level.
+
+            Parameters
+            ----------
+            lev : int
+                Refinement level (0 for base level)
+            )doc"
+        )
+        .def("gather_power_deposition_tracking",
+            [](WarpXParticleContainer& pc, int lev, int ngrow) {
+                amrex::Vector<amrex::Real> data;
+                amrex::Box box;
+                pc.gatherPowerDepositionTracking(lev, data, box, ngrow);
+
+                std::vector<amrex::Real> data_vec(data.begin(), data.end());
+                std::vector<int> box_lo(AMREX_SPACEDIM);
+                std::vector<int> box_hi(AMREX_SPACEDIM);
+
+                for (int i = 0; i < AMREX_SPACEDIM; ++i) {
+                    box_lo[i] = box.smallEnd(i);
+                    box_hi[i] = box.bigEnd(i);
+                }
+
+                return py::make_tuple(data_vec, box_lo, box_hi);
+            },
+            py::arg("lev"), py::arg("ngrow") = 0,
+            R"doc(Gather power deposition tracking data from all boxes into a single spatial array.
+
+            Collects data from all boxes and arranges them spatially into a single
+            contiguous array. Only the IO processor (rank 0) gets the full data;
+            other ranks get empty arrays.
+
+            The returned data is flattened in row-major (C) order with interleaved
+            components: for each cell (i,j,k), data contains [Px, Py, Pz].
+
+            Parameters
+            ----------
+            lev : int
+                Refinement level (0 for base level)
+            ngrow : int, optional
+                Number of grow cells to include (default=0)
+
+            Returns
+            -------
+            tuple of (data, box_lo, box_hi)
+                data : list of float
+                    Flattened array with shape (ncells * 3,)
+                box_lo : list of int
+                    Lower corner indices of the box [ilo, jlo, klo]
+                box_hi : list of int
+                    Upper corner indices (inclusive) [ihi, jhi, khi]
+            )doc"
         )
     ;
 }

@@ -1115,6 +1115,13 @@ Particle initialization
 
     Currently implemented on CPU only.
 
+* ``<species_name>.enable_power_deposition_tracking`` (`bool`) optional (default `0`)
+    If true, accumulate per-cell, per-direction (x/y/z) J.E power deposited into this
+    species during the particle push, sampled at the exact velocity and field values
+    used in the momentum push. Only covers the explicit push (not the implicit solver).
+    Accessible from Python via ``pywarpx.power_deposition_trackers``. Not preserved
+    across checkpoint/restart.
+
 * ``<species_name>.do_continuous_injection`` (`0` or `1`)
     Whether to inject particles during the simulation, and not only at
     initialization. This can be required with a moving window and/or when

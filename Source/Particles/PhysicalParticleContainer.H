@@ -468,6 +468,10 @@ protected:
     // A flag to enable saving of the previous timestep positions
     bool m_save_previous_position = false;
 
+    // A flag to enable per-cell, per-direction (x/y/z) J.E power deposition tracking
+    // for this species during the (explicit) particle push
+    bool m_enable_power_deposition_tracking = false;
+
     // Flag controlling whether or not variance and then temperatures are computed per species
     bool m_do_temperature_deposition = false;
 

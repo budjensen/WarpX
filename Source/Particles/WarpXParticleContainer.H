@@ -641,6 +641,24 @@ protected:
     /** Whether back-transformed diagnostics is turned on for the corresponding species.*/
     bool m_do_back_transformed_particles = false;
 
+    /** Per-level, 3-component (x/y/z) MultiFab accumulating J.E "power deposition"
+     *  for this species during the particle push. Lazily (re)allocated by
+     *  InitializePowerDepositionTracking; null/empty until tracking is enabled. */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_power_deposition_tracking_mf;
+
+    /** (Re)allocate m_power_deposition_tracking_mf to match the given per-level
+     *  BoxArray/DistributionMapping. Idempotent: a no-op if the existing MultiFabs
+     *  already match. Self-heals after a regrid/load-balance event (which changes
+     *  the DistributionMapping) by reallocating and zeroing the affected level,
+     *  printing a one-time notice that accumulated data was reset.
+     *
+     * \param[in] ba per-level BoxArray (species' own particle BoxArray)
+     * \param[in] dm per-level DistributionMapping (species' own particle DistributionMapping)
+     */
+    void InitializePowerDepositionTracking (
+        amrex::Vector<amrex::BoxArray> const& ba,
+        amrex::Vector<amrex::DistributionMapping> const& dm);
+
 #ifdef WARPX_QED
     //Species can receive a shared pointer to a QED engine (species for
     //which this is relevant should override these functions)
@@ -680,6 +698,35 @@ public:
 
     // By default this returns false, can be overridden in PysicalParticleContainer
     virtual bool getTemperatureDepositionFlag () const noexcept {return false;}
+
+    /** Get the power deposition tracking MultiFab for a given refinement level.
+     *
+     * \param[in] lev refinement level
+     * \return pointer to the 3-component (x/y/z) tracking MultiFab, or nullptr
+     *         if tracking has not been initialized (e.g. not enabled) for this level
+     */
+    amrex::MultiFab* getPowerDepositionTracking (int lev);
+
+    /** Reset power deposition tracking data (zero all cells) for a given level.
+     *
+     * \param[in] lev refinement level
+     */
+    void resetPowerDepositionTracking (int lev);
+
+    /** Gather power deposition tracking data from all boxes into a single spatial array.
+     *
+     * Collects data from all boxes and arranges them spatially into a single
+     * contiguous array. Only the IO processor (rank 0) gets the full data;
+     * other ranks get an empty vector.
+     *
+     * \param[in] lev refinement level
+     * \param[out] data output vector containing the gathered spatial data,
+     *             flattened in row-major order with 3 interleaved components (x,y,z)
+     * \param[out] box output Box describing the index space of the gathered data
+     * \param[in] ngrow number of grow cells to include (default=0)
+     */
+    void gatherPowerDepositionTracking (int lev, amrex::Vector<amrex::Real>& data,
+                                        amrex::Box& box, int ngrow=0);
 
 private:
     void particlePostLocate(ParticleType& p, const amrex::ParticleLocData& pld, int lev) override;

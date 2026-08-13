@@ -79,6 +79,10 @@ class Species(picmistandard.PICMI_Species):
     warpx_save_previous_position: bool, default=False
         Whether to save the old particle positions
 
+    warpx_enable_power_deposition_tracking: bool, default=False
+        Whether to accumulate per-cell, per-direction (x/y/z) J.E power
+        deposited into this species during the particle push
+
     warpx_do_not_deposit: bool, default=False
         Whether or not to deposit the charge and current density for
         for this species
@@ -264,6 +268,9 @@ class Species(picmistandard.PICMI_Species):
         self.self_fields_max_iters = kw.pop("warpx_self_fields_max_iters", None)
         self.self_fields_verbosity = kw.pop("warpx_self_fields_verbosity", None)
         self.save_previous_position = kw.pop("warpx_save_previous_position", None)
+        self.enable_power_deposition_tracking = kw.pop(
+            "warpx_enable_power_deposition_tracking", None
+        )
         self.do_not_deposit = kw.pop("warpx_do_not_deposit", None)
         self.do_not_push = kw.pop("warpx_do_not_push", None)
         self.do_not_gather = kw.pop("warpx_do_not_gather", None)
@@ -364,6 +371,7 @@ class Species(picmistandard.PICMI_Species):
             save_particles_at_zhi=self.save_particles_at_zhi,
             save_particles_at_eb=self.save_particles_at_eb,
             save_previous_position=self.save_previous_position,
+            enable_power_deposition_tracking=self.enable_power_deposition_tracking,
             do_not_deposit=self.do_not_deposit,
             do_not_push=self.do_not_push,
             do_not_gather=self.do_not_gather,
