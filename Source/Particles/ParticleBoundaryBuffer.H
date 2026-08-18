@@ -41,7 +41,17 @@ public:
 
     const std::vector<std::string>& getSpeciesNames() const;
 
-    void gatherParticlesFromDomainBoundaries (MultiParticleContainer& mypc);
+    /**
+     * \brief Copy particles that are outside the domain boundaries into the buffer.
+     *
+     * \param mypc the multi-particle container to gather from
+     * \param step_offset offset added to istep when stamping the buffered
+     *        particles' stepScraped attribute. Pass 1 when gathering from
+     *        inside OneStep (i.e. before istep has been incremented for the
+     *        current step) so that mid-step scrapes carry the same step
+     *        stamp as the end-of-step scrape.
+     */
+    void gatherParticlesFromDomainBoundaries (MultiParticleContainer& mypc, int step_offset = 0);
     void gatherParticlesFromEmbeddedBoundaries (
         MultiParticleContainer& mypc, ablastr::fields::MultiLevelScalarField const& distance_to_eb
     );

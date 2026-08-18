@@ -380,7 +380,7 @@ void ParticleBoundaryBuffer::clearParticles (int const i) {
     }
 }
 
-void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleContainer& mypc)
+void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleContainer& mypc, int step_offset)
 {
     WARPX_PROFILE("ParticleBoundaryBuffer::gatherParticles");
 
@@ -475,7 +475,7 @@ void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleC
                           const int step_scraped_index = buf.GetIntCompIndex("stepScraped") - PinnedMemoryParticleContainer::NArrayInt;
                           const int delta_index = buf.GetRealCompIndex("deltaTimeScraped") - PinnedMemoryParticleContainer::NArrayReal;
                           const int normal_index = buf.GetRealCompIndex("nx") - PinnedMemoryParticleContainer::NArrayReal;
-                          const int step = warpx_instance.getistep(0);
+                          const int step = warpx_instance.getistep(0) + step_offset;
                           amrex::filterAndTransformParticles(ptile_buffer, ptile,
                                                              predicate,
                                                              CopyAndTimestamp{step_scraped_index, delta_index, normal_index, step, dt, idim, iside},

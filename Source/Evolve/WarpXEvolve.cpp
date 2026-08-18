@@ -407,6 +407,16 @@ void WarpX::OneStep (
                     MomentumPushType::Full
                 );
 
+                // Particles that crossed a domain boundary during the first
+                // half position push would be deleted by the Redistribute
+                // below without ever reaching the particle boundary buffer,
+                // hiding them from boundary diagnostics (scraped-particle
+                // counts, wall energy flux). Gather them into the buffer
+                // first. istep has not yet been incremented for this step,
+                // so stamp them with istep+1 (step_offset=1) to match the
+                // end-of-step scrape in HandleParticlesAtBoundaries.
+                m_particle_boundary_buffer->gatherParticlesFromDomainBoundaries(*mypc, 1);
+
                 // communicate particle data
                 mypc->Redistribute();
 
