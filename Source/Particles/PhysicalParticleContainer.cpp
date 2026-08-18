@@ -1501,10 +1501,21 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
 #endif
 
         if (do_power_tracking) {
+            // Deposit q*w*v_mid.E with the midpoint velocity
+            // v_mid = (v^{n-1/2} + v^{n+1/2})/2. For the leapfrog/Boris push
+            // with no magnetic field the discrete kinetic-energy change per
+            // step is exactly q*E.(v_old + v_new)/2*dt, so sampling only
+            // v_old (or v_new) biases the deposited power by -+q^2 E^2 dt/(2m).
             constexpr amrex::ParticleReal power_inv_c2 = 1.0/(PhysConst::c*PhysConst::c);
             amrex::ParticleReal const u2_old = ux_old_power*ux_old_power
                 + uy_old_power*uy_old_power + uz_old_power*uz_old_power;
             amrex::ParticleReal const inv_gamma_old = 1.0/std::sqrt(1.0 + u2_old*power_inv_c2);
+            amrex::ParticleReal const u2_new = ux[ip]*ux[ip]
+                + uy[ip]*uy[ip] + uz[ip]*uz[ip];
+            amrex::ParticleReal const inv_gamma_new = 1.0/std::sqrt(1.0 + u2_new*power_inv_c2);
+            amrex::ParticleReal const vx_mid = 0.5_prt*(ux_old_power*inv_gamma_old + ux[ip]*inv_gamma_new);
+            amrex::ParticleReal const vy_mid = 0.5_prt*(uy_old_power*inv_gamma_old + uy[ip]*inv_gamma_new);
+            amrex::ParticleReal const vz_mid = 0.5_prt*(uz_old_power*inv_gamma_old + uz[ip]*inv_gamma_new);
             amrex::ParticleReal const q_eff = q * static_cast<amrex::ParticleReal>(ion_lev ? ion_lev[ip] : 1);
             amrex::Real const wt = static_cast<amrex::Real>(wp_power[ip]);
 
@@ -1520,11 +1531,11 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
             pk = static_cast<int>((zp - power_tracking_plo[2]) * power_tracking_dxi[2]);
 #endif
             amrex::Gpu::Atomic::AddNoRet(&power_arr(pi,pj,pk,0),
-                wt*static_cast<amrex::Real>(q_eff*(ux_old_power*inv_gamma_old)*Exp));
+                wt*static_cast<amrex::Real>(q_eff*vx_mid*Exp));
             amrex::Gpu::Atomic::AddNoRet(&power_arr(pi,pj,pk,1),
-                wt*static_cast<amrex::Real>(q_eff*(uy_old_power*inv_gamma_old)*Eyp));
+                wt*static_cast<amrex::Real>(q_eff*vy_mid*Eyp));
             amrex::Gpu::Atomic::AddNoRet(&power_arr(pi,pj,pk,2),
-                wt*static_cast<amrex::Real>(q_eff*(uz_old_power*inv_gamma_old)*Ezp));
+                wt*static_cast<amrex::Real>(q_eff*vz_mid*Ezp));
         }
 
         amrex::Real position_dt = dt;
