@@ -3070,11 +3070,67 @@ class ICPHeating(picmistandard.base._ClassWithInit):
     z_min, z_max : float
         Axial bounds of the heating region in meters.
 
-    j0_amplitude : float or str
-        Current density amplitude J_0(z,t):
+    j0_amplitude : float or str, optional
+        Fixed current density amplitude J_0(z,t):
         - float: constant amplitude (A/m^2)
         - str: mathematical expression as function of (z,t) for parser
               Example: "100.0 * exp(-(z-0.005)^2/0.001^2)"
+        Exactly one of j0_amplitude and controlled_j0_amplitude must be given.
+
+    controlled_j0_amplitude : str, optional
+        Current density profile as a mathematical expression of (J_0, z, t),
+        where the scalar amplitude J_0 is adjusted at runtime by a PID
+        controller so that the domain-integrated, period-averaged inductive
+        power absorbed by the plasma converges to P_target.
+        Example: "J_0*(1/(1+exp(-6283.2*(z-0.0075))) - 1/(1+exp(-785.4*(z-0.0175))))"
+        Requires J_0_initial and P_target. Power deposition tracking is
+        force-enabled for all species when this mode is active.
+
+    J_0_initial : float, optional
+        Starting amplitude J_0 in A/m^2 (required with controlled_j0_amplitude).
+        On a checkpoint restart the controller state is restored automatically
+        from the checkpoint (see restore_controller_from_checkpoint); to
+        restore manually instead, set J_0_initial to the final J_0 of the
+        previous run.
+
+    P_target : float, optional
+        Target absorbed inductive power in W/m^2 (required with
+        controlled_j0_amplitude).
+
+    P_controller_period : float, optional
+        Averaging/update period of the controller in seconds
+        (default: 1/frequency).
+
+    pid_kp, pid_ki, pid_kd : float, optional
+        PID gains (defaults: 0.2, 0.1, 0). All three are DIMENSIONLESS
+        per-update gains acting on the normalized error
+        e = (P_target - P_avg)/P_target: the controller period is folded into
+        them, so they must be retuned if P_controller_period changes
+        (e.g. pid_ki = 0.1 moves J_0 by 10% of the relative power error each
+        controller period). Keeping pid_kd = 0 is recommended — the
+        derivative term amplifies the statistical noise of the PIC power
+        measurement.
+
+    J_0_min, J_0_max : float, optional
+        Clamps on J_0 in A/m^2 (defaults: 0.01*J_0_initial, 100*J_0_initial).
+        Set these explicitly if they must stay fixed across restarts.
+
+    controller_delay_N_periods : int, optional
+        Number of controller periods to wait before the PID becomes active
+        (default: 50). During the delay the power is still measured and
+        recorded in the history, but J_0 is not updated, letting the
+        simulation converge first.
+
+    controller_history_size : int, optional
+        Maximum number of controller updates kept in the in-memory history
+        returned by sim.extension.warpx.get_icp_controller_history()
+        (default: 1000; oldest entries are dropped first).
+
+    restore_controller_from_checkpoint : bool, optional
+        On a checkpoint restart, restore J_0 and the PID state from the
+        ICPController_data.txt sidecar file in the checkpoint (default: True).
+        Checkpoints written before this feature existed simply fall back to
+        J_0_initial.
 
     ey_max : float, optional
         Maximum allowed transverse electric field amplitude in V/m.
@@ -3125,16 +3181,58 @@ class ICPHeating(picmistandard.base._ClassWithInit):
     ...     integrator="rk2",
     ... )
     >>> sim.add_icp_heating(icp)
+
+    PID-controlled amplitude targeting a specified absorbed power:
+
+    >>> icp = picmi.ICPHeating(
+    ...     frequency=100e6,
+    ...     z_min=0.0,
+    ...     z_max=0.025,
+    ...     controlled_j0_amplitude=(
+    ...         "J_0*(1/(1+exp(-6283.185307179586*(z-0.0075)))"
+    ...         " - 1/(1+exp(-785.3981633974482*(z-0.0175))))"
+    ...     ),
+    ...     J_0_initial=3.5e3,  # A/m^2
+    ...     P_target=4e3,  # W/m^2
+    ...     P_controller_period=1e-8,  # s (optional, defaults to 1/frequency)
+    ... )
+    >>> sim.add_icp_heating(icp)
     """
 
     _valid_integrators = ("euler", "ab2", "rk2", "rk4")
+
+    _controller_only_kwargs = (
+        "J_0_initial",
+        "P_target",
+        "P_controller_period",
+        "pid_kp",
+        "pid_ki",
+        "pid_kd",
+        "J_0_min",
+        "J_0_max",
+        "controller_delay_N_periods",
+        "controller_history_size",
+        "restore_controller_from_checkpoint",
+    )
 
     def __init__(
         self,
         frequency,
         z_min,
         z_max,
-        j0_amplitude,
+        j0_amplitude=None,
+        controlled_j0_amplitude=None,
+        J_0_initial=None,
+        P_target=None,
+        P_controller_period=None,
+        pid_kp=None,
+        pid_ki=None,
+        pid_kd=None,
+        J_0_min=None,
+        J_0_max=None,
+        controller_delay_N_periods=None,
+        controller_history_size=None,
+        restore_controller_from_checkpoint=None,
         ey_max=1e6,
         integrator="euler",
         **kw,
@@ -3143,6 +3241,18 @@ class ICPHeating(picmistandard.base._ClassWithInit):
         self.z_min = z_min
         self.z_max = z_max
         self.j0_amplitude = j0_amplitude
+        self.controlled_j0_amplitude = controlled_j0_amplitude
+        self.J_0_initial = J_0_initial
+        self.P_target = P_target
+        self.P_controller_period = P_controller_period
+        self.pid_kp = pid_kp
+        self.pid_ki = pid_ki
+        self.pid_kd = pid_kd
+        self.J_0_min = J_0_min
+        self.J_0_max = J_0_max
+        self.controller_delay_N_periods = controller_delay_N_periods
+        self.controller_history_size = controller_history_size
+        self.restore_controller_from_checkpoint = restore_controller_from_checkpoint
         self.ey_max = ey_max
         self.integrator = integrator
 
@@ -3156,6 +3266,52 @@ class ICPHeating(picmistandard.base._ClassWithInit):
                 f"integrator must be one of {self._valid_integrators}, "
                 f"got '{self.integrator}'"
             )
+
+        if (self.j0_amplitude is None) == (self.controlled_j0_amplitude is None):
+            raise ValueError(
+                "exactly one of j0_amplitude and controlled_j0_amplitude "
+                "must be specified"
+            )
+
+        if self.controlled_j0_amplitude is not None:
+            if not isinstance(self.controlled_j0_amplitude, str):
+                raise ValueError(
+                    "controlled_j0_amplitude must be a string expression of (J_0, z, t)"
+                )
+            if "J_0" not in self.controlled_j0_amplitude:
+                raise ValueError(
+                    "controlled_j0_amplitude must reference the controlled "
+                    "amplitude symbol J_0"
+                )
+            if self.J_0_initial is None or self.J_0_initial <= 0:
+                raise ValueError(
+                    "J_0_initial must be specified and positive when using "
+                    "controlled_j0_amplitude"
+                )
+            if self.P_target is None or self.P_target <= 0:
+                raise ValueError(
+                    "P_target must be specified and positive when using "
+                    "controlled_j0_amplitude"
+                )
+            if self.J_0_min is not None and self.J_0_min <= 0:
+                raise ValueError("J_0_min must be positive")
+            J_0_min = (
+                self.J_0_min if self.J_0_min is not None else 0.01 * self.J_0_initial
+            )
+            J_0_max = (
+                self.J_0_max if self.J_0_max is not None else 100.0 * self.J_0_initial
+            )
+            if not (J_0_min <= self.J_0_initial <= J_0_max):
+                raise ValueError("must satisfy J_0_min <= J_0_initial <= J_0_max")
+        else:
+            for name in self._controller_only_kwargs:
+                if getattr(self, name) is not None:
+                    raise ValueError(f"{name} requires controlled_j0_amplitude")
+            if isinstance(self.j0_amplitude, str) and "J_0" in self.j0_amplitude:
+                raise ValueError(
+                    "j0_amplitude references J_0; use controlled_j0_amplitude "
+                    "for the PID-controlled mode"
+                )
 
         self.handle_init(kw)
 
@@ -3173,8 +3329,28 @@ class ICPHeating(picmistandard.base._ClassWithInit):
         pywarpx.icp_heating.ey_max = self.ey_max
         pywarpx.icp_heating.integrator = self.integrator
 
-        # Set j0 amplitude (can be float or string expression)
-        if isinstance(self.j0_amplitude, str):
+        if self.controlled_j0_amplitude is not None:
+            # PID power controller mode
+            pywarpx.icp_heating.__setattr__(
+                "j0_amplitude(J_0,z,t)", self.controlled_j0_amplitude
+            )
+            # Bucket.attrlist() skips None values, so C++ defaults apply
+            pywarpx.icp_heating.J_0_initial = self.J_0_initial
+            pywarpx.icp_heating.P_target = self.P_target
+            pywarpx.icp_heating.P_controller_period = self.P_controller_period
+            pywarpx.icp_heating.pid_kp = self.pid_kp
+            pywarpx.icp_heating.pid_ki = self.pid_ki
+            pywarpx.icp_heating.pid_kd = self.pid_kd
+            pywarpx.icp_heating.J_0_min = self.J_0_min
+            pywarpx.icp_heating.J_0_max = self.J_0_max
+            pywarpx.icp_heating.controller_delay_N_periods = (
+                self.controller_delay_N_periods
+            )
+            pywarpx.icp_heating.controller_history_size = self.controller_history_size
+            pywarpx.icp_heating.restore_controller_from_checkpoint = (
+                self.restore_controller_from_checkpoint
+            )
+        elif isinstance(self.j0_amplitude, str):
             pywarpx.icp_heating.__setattr__("j0_amplitude(z,t)", self.j0_amplitude)
         else:
             pywarpx.icp_heating.j0_amplitude = float(self.j0_amplitude)

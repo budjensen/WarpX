@@ -15,6 +15,7 @@
 #include <FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H>
 #include <FieldSolver/FiniteDifferenceSolver/MacroscopicProperties/MacroscopicProperties.H>
 #include <FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H>
+#include <FieldSolver/InductiveHeating/ICPHeatingModel.H>
 #ifdef WARPX_USE_FFT
 #   include <FieldSolver/SpectralSolver/SpectralKSpace.H>
 #   ifdef WARPX_DIM_RZ
@@ -335,6 +336,78 @@ The physical fields in WarpX have the following naming:
                 return wx.get_pointer_HybridPICModel()->m_n_floor;
             },
             "Gets the number of substeps to take in the hybrid solver."
+        )
+        // Accessor bindings for the ICP heating PID power controller
+        .def("get_icp_j0",
+            [](WarpX& wx) {
+                auto* icp = wx.get_pointer_ICPHeatingModel();
+                if (!icp || !icp->is_controller_enabled()) {
+                    throw std::runtime_error("The ICP power controller is not enabled");
+                }
+                return icp->GetJ0();
+            },
+            "Gets the current J_0 amplitude [A/m^2] of the ICP power controller."
+        )
+        .def("set_icp_j0",
+            [](WarpX& wx, amrex::Real j0) {
+                auto* icp = wx.get_pointer_ICPHeatingModel();
+                if (!icp || !icp->is_controller_enabled()) {
+                    throw std::runtime_error("The ICP power controller is not enabled");
+                }
+                icp->SetJ0(j0);
+            },
+            py::arg("j0"),
+            "Sets the J_0 amplitude [A/m^2] of the ICP power controller.\n"
+            "Must be called on all MPI ranks. The value is clamped to\n"
+            "[J_0_min, J_0_max]; the averaging window is restarted and the\n"
+            "PID error history is re-bootstrapped (the next update is\n"
+            "Ki-only). Use this to restore J_0 manually after a restart."
+        )
+        .def("get_icp_mean_power",
+            [](WarpX& wx) {
+                auto* icp = wx.get_pointer_ICPHeatingModel();
+                if (!icp || !icp->is_controller_enabled()) {
+                    throw std::runtime_error("The ICP power controller is not enabled");
+                }
+                return icp->GetLastMeanPower();
+            },
+            "Gets the mean absorbed inductive power [W/m^2] of the last\n"
+            "completed controller averaging window (0 before the first\n"
+            "window completes)."
+        )
+        .def("get_icp_controller_history",
+            [](WarpX& wx) {
+                auto* icp = wx.get_pointer_ICPHeatingModel();
+                if (!icp || !icp->is_controller_enabled()) {
+                    throw std::runtime_error("The ICP power controller is not enabled");
+                }
+                auto const& history = icp->GetControllerHistory();
+                std::vector<int> steps;
+                std::vector<amrex::Real> times, powers, errors, j0s;
+                steps.reserve(history.size());
+                times.reserve(history.size());
+                powers.reserve(history.size());
+                errors.reserve(history.size());
+                j0s.reserve(history.size());
+                for (auto const& entry : history) {
+                    steps.push_back(entry.step);
+                    times.push_back(entry.time);
+                    powers.push_back(entry.mean_power);
+                    errors.push_back(entry.error);
+                    j0s.push_back(entry.j0);
+                }
+                py::dict result;
+                result["step"] = steps;
+                result["time"] = times;
+                result["mean_power"] = powers;
+                result["error"] = errors;
+                result["J_0"] = j0s;
+                return result;
+            },
+            "Gets the recorded ICP power controller history as a dict of\n"
+            "lists keyed 'step', 'time', 'mean_power', 'error', 'J_0'\n"
+            "(one entry per completed averaging window, bounded by\n"
+            "icp_heating.controller_history_size)."
         )
     ;
 
