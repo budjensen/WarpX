@@ -258,25 +258,38 @@ void ICPHeatingModel::AllocateLevelMFs(
 {
     if (!m_do_icp_heating) { return; }
 
+    // E_y (Efield_fp[1]) and J_y (current_fp[1]) are node-centered in 1D-Z.
+    // Every ICP scratch field must share that staggering: the update kernels
+    // iterate the nodal tilebox of Efield_fp[1] and index these fields at
+    // every node, including each box's high-edge node. A cell-centered
+    // allocation would leave that shared node reading unwritten ghost data,
+    // zeroing E_y at every box boundary.
+    const BoxArray ba_nodal = amrex::convert(ba, IntVect::TheNodeVector());
+
+    using ablastr::fields::Direction;
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+        fields.get(FieldType::Efield_fp, Direction{1}, lev)->boxArray() == ba_nodal,
+        "ICPHeatingModel: scratch fields must match the staggering of Efield_fp[1]");
+
     // Prescribed target current density (diagnostic output)
-    fields.alloc_init("Jy_icp_target", lev, ba, dm, 1, ng, 0.0_rt);
+    fields.alloc_init("Jy_icp_target", lev, ba_nodal, dm, 1, ng, 0.0_rt);
 
     // E_y^n snapshot — base for all integrator branches each step
-    fields.alloc_init("Ey_icp_base",   lev, ba, dm, 1, ng, 0.0_rt);
+    fields.alloc_init("Ey_icp_base",   lev, ba_nodal, dm, 1, ng, 0.0_rt);
 
     // RK stage storage: F_i = (J_target - J_cond) / eps0
     // k1 is also used by Euler and AB2 for their single F evaluation.
-    fields.alloc_init("k1_icp",        lev, ba, dm, 1, ng, 0.0_rt);
-    fields.alloc_init("k2_icp",        lev, ba, dm, 1, ng, 0.0_rt);
-    fields.alloc_init("k3_icp",        lev, ba, dm, 1, ng, 0.0_rt);
-    fields.alloc_init("k4_icp",        lev, ba, dm, 1, ng, 0.0_rt);
+    fields.alloc_init("k1_icp",        lev, ba_nodal, dm, 1, ng, 0.0_rt);
+    fields.alloc_init("k2_icp",        lev, ba_nodal, dm, 1, ng, 0.0_rt);
+    fields.alloc_init("k3_icp",        lev, ba_nodal, dm, 1, ng, 0.0_rt);
+    fields.alloc_init("k4_icp",        lev, ba_nodal, dm, 1, ng, 0.0_rt);
 
     // F_{n-1} for Adams-Bashforth 2-step history
-    fields.alloc_init("F_prev_icp",    lev, ba, dm, 1, ng, 0.0_rt);
+    fields.alloc_init("F_prev_icp",    lev, ba_nodal, dm, 1, ng, 0.0_rt);
 
     // A permanently zero-valued field used as Ex=Ez=Bx=By=Bz=0 in
     // PushTransverseMomenta. Never written to after initialization.
-    fields.alloc_init("zero_field_icp", lev, ba, dm, 1, ng, 0.0_rt);
+    fields.alloc_init("zero_field_icp", lev, ba_nodal, dm, 1, ng, 0.0_rt);
 }
 
 // =============================================================================
@@ -423,6 +436,15 @@ void ICPHeatingModel::UpdateTransverseElectricField(
 
         m_is_first_step = false;
     }
+
+    // E_y is nodal, so the node shared by adjacent boxes is computed by both.
+    // The inputs (post-SumBoundary J_y, Ey_base, the parsed profile) are
+    // identical in both copies, so the duplicated values already agree; this
+    // sync is insurance against roundoff-order divergence (e.g. three or more
+    // SumBoundary contributors on very narrow boxes) accumulating over long
+    // runs. Its cost is negligible next to the per-step current depositions.
+    const auto& period = WarpX::GetInstance().Geom(lev).periodicity();
+    Ey_fp->OverrideSync(period);
 }
 
 // =============================================================================
@@ -591,7 +613,7 @@ void ICPHeatingModel::ComputeEyRHS(
         auto const& Jtgt_arr   = Jy_target_mf->array(mfi);
 
         ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-            const Real z = zmin + (i + 0.5_rt) * dz;
+            const Real z = zmin + static_cast<Real>(i) * dz;  // node-centered coordinate
 
             if (z >= z_min && z <= z_max) {
                 const Real J_target = j0_exe(z, time, J0_now) * std::sin(phase);
@@ -640,7 +662,7 @@ void ICPHeatingModel::SetTransverseElectricField(
         auto const& F_arr    = F.const_array(mfi);
 
         ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int kk) {
-            const Real z = zmin + (i + 0.5_rt) * dz;
+            const Real z = zmin + static_cast<Real>(i) * dz;  // node-centered coordinate
 
             if (z >= z_min && z <= z_max) {
                 Real Ey_new = base_arr(i, j, kk) + coeff * F_arr(i, j, kk);
@@ -692,7 +714,7 @@ void ICPHeatingModel::ApplyAB2Update(
 
         // E_y^{n+1} = E_y^n + dt * (3/2 * F_n - 1/2 * F_{n-1})
         ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int kk) {
-            const Real z = zmin + (i + 0.5_rt) * dz;
+            const Real z = zmin + static_cast<Real>(i) * dz;  // node-centered coordinate
 
             if (z >= z_min && z <= z_max) {
                 Real Ey_new = base_arr(i, j, kk)
@@ -742,7 +764,7 @@ void ICPHeatingModel::ApplyRK2Update(
 
         // E_y^{n+1} = E_y^n + (dt/2) * (k1 + k2)
         ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int kk) {
-            const Real z = zmin + (i + 0.5_rt) * dz;
+            const Real z = zmin + static_cast<Real>(i) * dz;  // node-centered coordinate
 
             if (z >= z_min && z <= z_max) {
                 Real Ey_new = base_arr(i, j, kk)
@@ -795,7 +817,7 @@ void ICPHeatingModel::ApplyRK4Update(
 
         // E_y^{n+1} = E_y^n + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
         ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int kk) {
-            const Real z = zmin + (i + 0.5_rt) * dz;
+            const Real z = zmin + static_cast<Real>(i) * dz;  // node-centered coordinate
 
             if (z >= z_min && z <= z_max) {
                 Real Ey_new = base_arr(i, j, kk)

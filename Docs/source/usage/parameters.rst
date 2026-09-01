@@ -2750,6 +2750,8 @@ evolved as :math:`dE_y/dt = (J_{y,\mathrm{target}} - J_{y,\mathrm{cond}})/\epsil
     a constant scalar, a fixed parser expression of ``(z,t)``, or a parser
     expression of ``(J_0,z,t)`` whose scalar amplitude ``J_0`` is adjusted at
     runtime by the PID power controller (see below).
+    ``z`` in the amplitude expression and the :math:`[z_\mathrm{min}, z_\mathrm{max}]`
+    mask are evaluated at grid **nodes** (:math:`E_y` is node-centered in 1D).
 
 * ``icp_heating.ey_max`` (`float`, in V/m) optional (default `1e10`)
     Hard limiter on the magnitude of :math:`E_y`.

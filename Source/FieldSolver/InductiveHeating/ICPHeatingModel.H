@@ -97,6 +97,10 @@ public:
      * Allocates J_y_target (diagnostic), E_y_base (saves E_y^n at the start
      * of each step), k1-k4 (RK stage RHS storage), F_prev (AB2 history),
      * and zero_field (used as a zero-valued E/B field in PushTransverseMomenta).
+     *
+     * All scratch fields are allocated NODE-centered to match the staggering
+     * of Efield_fp[1] and current_fp[1] in 1D-Z; the cell-centered level
+     * BoxArray \p ba is converted internally.
      */
     void AllocateLevelMFs(
         ablastr::fields::MultiFabRegister& fields,
