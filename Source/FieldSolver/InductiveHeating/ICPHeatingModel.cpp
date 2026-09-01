@@ -17,6 +17,7 @@
 #include "WarpX.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
+#include <ablastr/warn_manager/WarnManager.H>
 
 #include <AMReX_Array.H>
 #include <AMReX_BLassert.H>
@@ -40,7 +41,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 
 using namespace amrex;
@@ -84,21 +87,121 @@ void ICPHeatingModel::ReadParameters()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_z_max > m_z_min, "icp_heating: z_max must be greater than z_min");
 
-    // J_0(z,t) amplitude — constant scalar or parser expression
-    std::string j0_str;
-    amrex::ParticleReal j0_amplitude = 0;
-    if (utils::parser::queryWithParser(pp_icp, "j0_amplitude", j0_amplitude)) {
+    // J_0 amplitude — one of three input forms:
+    //   j0_amplitude          : constant scalar [A/m^2]
+    //   j0_amplitude(z,t)     : parser expression with fixed amplitude
+    //   j0_amplitude(J_0,z,t) : parser expression whose scalar J_0 is adjusted
+    //                           by the PID power controller
+    const bool has_scalar = pp_icp.contains("j0_amplitude");
+    const bool has_zt     = pp_icp.contains("j0_amplitude(z,t)");
+    const bool has_ctrl   = pp_icp.contains("j0_amplitude(J_0,z,t)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        (static_cast<int>(has_scalar) + static_cast<int>(has_zt)
+         + static_cast<int>(has_ctrl)) == 1,
+        "icp_heating: exactly one of j0_amplitude, j0_amplitude(z,t), or "
+        "j0_amplitude(J_0,z,t) must be specified");
+
+    if (has_scalar) {
+        amrex::ParticleReal j0_amplitude = 0;
+        utils::parser::queryWithParser(pp_icp, "j0_amplitude", j0_amplitude);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             j0_amplitude >= 0, "icp_heating.j0_amplitude must be non-negative");
-        j0_str = std::to_string(j0_amplitude);
-        m_j0_parser = std::make_unique<Parser>(
-            utils::parser::makeParser(j0_str, {"z", "t"}));
+        m_j0_expression = std::to_string(j0_amplitude);
+    } else if (has_zt) {
+        utils::parser::Store_parserString(pp_icp, "j0_amplitude(z,t)", m_j0_expression);
     } else {
-        utils::parser::Store_parserString(pp_icp, "j0_amplitude(z,t)", j0_str);
-        m_j0_parser = std::make_unique<Parser>(
-            utils::parser::makeParser(j0_str, {"z", "t"}));
+        utils::parser::Store_parserString(pp_icp, "j0_amplitude(J_0,z,t)", m_j0_expression);
+        m_controller_enabled = true;
     }
-    m_j0_parser_exe = m_j0_parser->compile<2>();
+    // All three forms compile onto the same 3-variable executor. In the
+    // non-controller forms J_0 is registered but unused, which the amrex
+    // parser allows, so the compiled arithmetic is unchanged.
+    m_j0_parser = std::make_unique<Parser>(
+        utils::parser::makeParser(m_j0_expression, {"z", "t", "J_0"}));
+    m_j0_parser_exe = m_j0_parser->compile<3>();
+
+    if (m_controller_enabled) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_j0_parser->symbols().count("J_0") == 1,
+            "icp_heating.j0_amplitude(J_0,z,t) must reference the controlled "
+            "amplitude symbol J_0, otherwise the power controller has no effect");
+
+        utils::parser::getWithParser(pp_icp, "J_0_initial", m_j0_initial);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_j0_initial > 0.0_rt, "icp_heating.J_0_initial must be positive");
+        utils::parser::getWithParser(pp_icp, "P_target", m_P_target);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_P_target > 0.0_rt, "icp_heating.P_target must be positive");
+
+        m_ctrl_period_seconds = 1.0_rt / m_icp_frequency;
+        utils::parser::queryWithParser(pp_icp, "P_controller_period", m_ctrl_period_seconds);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_ctrl_period_seconds > 0.0_rt,
+            "icp_heating.P_controller_period must be positive");
+
+        // Gains are dimensionless per-update gains acting on the normalized
+        // error e = (P_target - P_bar)/P_target; the controller period is
+        // folded into them (see TickPowerController), so they must be
+        // retuned if P_controller_period changes. Kd = 0 is recommended:
+        // the derivative term amplifies PIC measurement noise.
+        utils::parser::queryWithParser(pp_icp, "pid_kp", m_pid_kp);
+        utils::parser::queryWithParser(pp_icp, "pid_ki", m_pid_ki);
+        utils::parser::queryWithParser(pp_icp, "pid_kd", m_pid_kd);
+
+        m_j0_min = 0.01_rt  * m_j0_initial;
+        m_j0_max = 100.0_rt * m_j0_initial;
+        utils::parser::queryWithParser(pp_icp, "J_0_min", m_j0_min);
+        utils::parser::queryWithParser(pp_icp, "J_0_max", m_j0_max);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            0.0_rt < m_j0_min && m_j0_min <= m_j0_initial && m_j0_initial <= m_j0_max,
+            "icp_heating: must satisfy 0 < J_0_min <= J_0_initial <= J_0_max");
+
+        utils::parser::queryWithParser(
+            pp_icp, "controller_delay_N_periods", m_ctrl_delay_periods);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_ctrl_delay_periods >= 0,
+            "icp_heating.controller_delay_N_periods must be non-negative");
+        utils::parser::queryWithParser(
+            pp_icp, "controller_history_size", m_history_capacity);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_history_capacity >= 0,
+            "icp_heating.controller_history_size must be non-negative");
+        pp_icp.query("restore_controller_from_checkpoint", m_restore_from_checkpoint);
+
+        const ParmParse pp_amr("amr");
+
+        // The controller samples the level-0 power buffers only.
+        int max_level = 0;
+        pp_amr.query("max_level", max_level);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            max_level == 0,
+            "icp_heating power controller requires amr.max_level = 0");
+
+        m_j0_current = m_j0_initial;
+
+        // On restart, restore J_0 and the PID state from the checkpoint
+        // sidecar file (missing file falls back to J_0_initial).
+        std::string restart_chkfile;
+        pp_amr.query("restart", restart_chkfile);
+        if (!restart_chkfile.empty() && m_restore_from_checkpoint) {
+            ReadCheckpointData(restart_chkfile);
+        }
+    } else {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_j0_parser->symbols().count("J_0") == 0,
+            "icp_heating: the amplitude expression references J_0, but the "
+            "controller form j0_amplitude(J_0,z,t) was not used; J_0 would "
+            "silently evaluate to 1");
+        for (auto const* key : {"J_0_initial", "P_target", "P_controller_period",
+                                "pid_kp", "pid_ki", "pid_kd", "J_0_min", "J_0_max",
+                                "controller_delay_N_periods", "controller_history_size",
+                                "restore_controller_from_checkpoint"}) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !pp_icp.contains(key),
+                "icp_heating." + std::string(key) + " requires the controller "
+                "form icp_heating.j0_amplitude(J_0,z,t)");
+        }
+    }
 
     // Field limiter
     utils::parser::queryWithParser(pp_icp, "ey_max", m_ey_max);
@@ -122,10 +225,23 @@ void ICPHeatingModel::ReadParameters()
                 << "ICP Heating Model Parameters:\n"
                 << "  Frequency:           " << m_icp_frequency  << " Hz\n"
                 << "  Heating region:      z = [" << m_z_min << ", " << m_z_max << "] m\n"
-                << "  J_0(z,t) expression: " << j0_str            << "\n"
+                << "  J_0 expression:      " << m_j0_expression   << "\n"
                 << "  E_y field limiter:   " << m_ey_max          << " V/m\n"
-                << "  Integrator:          " << integrator_str     << "\n"
-                << "----------------------------------------------------------------------\n\n";
+                << "  Integrator:          " << integrator_str     << "\n";
+        if (m_controller_enabled) {
+            Print() << "  PID power controller:\n"
+                    << "    J_0 (initial/restored): " << m_j0_current << " A/m^2\n"
+                    << "    P_target:               " << m_P_target << " W/m^2\n"
+                    << "    Controller period:      " << m_ctrl_period_seconds << " s\n"
+                    << "    Gains (Kp, Ki, Kd):     " << m_pid_kp << ", " << m_pid_ki
+                    << ", " << m_pid_kd
+                    << "  (dimensionless, per controller period)\n"
+                    << "    J_0 clamps:             [" << m_j0_min << ", "
+                    << m_j0_max << "] A/m^2\n"
+                    << "    Startup delay:          " << m_ctrl_delay_periods
+                    << " controller periods\n";
+        }
+        Print() << "----------------------------------------------------------------------\n\n";
     }
 }
 
@@ -465,6 +581,7 @@ void ICPHeatingModel::ComputeEyRHS(
     const Real z_max    = m_z_max;
 
     auto j0_exe = m_j0_parser_exe;
+    const Real J0_now = m_j0_current;
 
     for (MFIter mfi(F_out, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         const Box& bx = mfi.tilebox();
@@ -477,7 +594,7 @@ void ICPHeatingModel::ComputeEyRHS(
             const Real z = zmin + (i + 0.5_rt) * dz;
 
             if (z >= z_min && z <= z_max) {
-                const Real J_target = j0_exe(z, time) * std::sin(phase);
+                const Real J_target = j0_exe(z, time, J0_now) * std::sin(phase);
                 Jtgt_arr(i, j, k) = J_target;                        // diagnostic
                 F_arr(i, j, k)    = (J_target - Jcond_arr(i, j, k)) * inv_eps0;
             } else {
@@ -692,5 +809,185 @@ void ICPHeatingModel::ApplyRK4Update(
                 Ey_arr(i, j, kk) = 0.0_rt;
             }
         });
+    }
+}
+
+// =============================================================================
+// PID power controller
+// =============================================================================
+
+void ICPHeatingModel::TickPowerController(
+    MultiParticleContainer& mpc,
+    amrex::Real time,
+    amrex::Real dt,
+    int step)
+{
+    if (!m_do_icp_heating || !m_controller_enabled) { return; }
+
+    WARPX_PROFILE("ICPHeatingModel::TickPowerController");
+
+    // One-time conversion of the controller period to a whole number of steps
+    if (m_ctrl_period_steps < 0) {
+        m_ctrl_period_steps = std::max(
+            1, static_cast<int>(std::round(m_ctrl_period_seconds / dt)));
+        if (ParallelDescriptor::IOProcessor()) {
+            std::ostringstream ss;
+            ss << "ICP power controller: period of " << m_ctrl_period_seconds
+               << " s = " << m_ctrl_period_steps << " steps ("
+               << m_ctrl_period_steps * dt << " s effective)";
+            Print() << Utils::TextMsg::Info(ss.str());
+        }
+    }
+
+    // Absorbed inductive power this step [W/m^2]: delta of the running sum of
+    // the tracking buffer's y-component, summed over all species. The sum is
+    // an MPI allreduce, so the result (and J_0) is identical on every rank.
+    Real step_power = 0.0_rt;
+    for (int i = 0; i < mpc.nSpecies(); ++i) {
+        step_power += mpc.GetParticleContainer(i).samplePowerDepositionDelta(0, 1);
+    }
+    m_power_accum += step_power;
+
+    if (++m_steps_in_window < m_ctrl_period_steps) { return; }
+
+    // Averaging window complete
+    const Real pbar = m_power_accum / static_cast<Real>(m_steps_in_window);
+    m_last_mean_power = pbar;
+    ++m_windows_completed;
+
+    const Real e_k = (m_P_target - pbar) / m_P_target;
+
+    if (m_windows_completed > m_ctrl_delay_periods) {
+        // Velocity-form PID update (see the header for the derivation and
+        // gain conventions; gains are dimensionless per-update gains).
+        if (m_pid_bootstrap) {
+            m_e_prev  = e_k;
+            m_e_prev2 = e_k;
+            m_pid_bootstrap = false;
+        }
+        const Real factor = 1.0_rt
+            + m_pid_kp * (e_k - m_e_prev)
+            + m_pid_ki * e_k
+            + m_pid_kd * (e_k - 2.0_rt * m_e_prev + m_e_prev2);
+        m_j0_current = std::clamp(m_j0_current * factor, m_j0_min, m_j0_max);
+        m_e_prev2 = m_e_prev;
+        m_e_prev  = e_k;
+    }
+    // During the startup delay J_0 stays at its initial value, and
+    // m_pid_bootstrap remains true so the first active update is Ki-only.
+
+    if (m_history_capacity > 0) {
+        m_history.push_back({step, time, pbar, e_k, m_j0_current});
+        if (static_cast<int>(m_history.size()) > m_history_capacity) {
+            m_history.pop_front();
+        }
+    }
+
+    m_power_accum = 0.0_rt;
+    m_steps_in_window = 0;
+}
+
+void ICPHeatingModel::SetJ0(amrex::Real j0)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_controller_enabled,
+        "ICPHeatingModel::SetJ0 requires the PID controller mode "
+        "(icp_heating.j0_amplitude(J_0,z,t))");
+
+    m_j0_current = std::clamp(j0, m_j0_min, m_j0_max);
+    // Restart the averaging window (do not mix power measured under two
+    // different amplitudes) and re-bootstrap the PID error history.
+    m_power_accum = 0.0_rt;
+    m_steps_in_window = 0;
+    m_pid_bootstrap = true;
+}
+
+// =============================================================================
+// Checkpoint sidecar file (ICPController_data.txt)
+// =============================================================================
+
+namespace
+{
+    constexpr int icp_controller_checkpoint_version = 1;
+    const std::string icp_controller_checkpoint_name = "ICPController_data.txt";
+}
+
+void ICPHeatingModel::WriteCheckpointData(std::string const& dir) const
+{
+    if (!m_controller_enabled) { return; }
+    if (!ParallelDescriptor::IOProcessor()) { return; }
+
+    const std::string filename = dir + "/" + icp_controller_checkpoint_name;
+    std::ofstream chkfile{filename, std::ofstream::out};
+    if (!chkfile.good()) {
+        WARPX_ABORT_WITH_MESSAGE(
+            "ICP power controller: could not open checkpoint file " + filename);
+    }
+    chkfile.precision(17);
+    chkfile << icp_controller_checkpoint_version << "\n";
+    chkfile << m_j0_current << "\n";
+    chkfile << m_e_prev << "\n";
+    chkfile << m_e_prev2 << "\n";
+    chkfile << m_windows_completed << "\n";
+    chkfile << static_cast<int>(m_pid_bootstrap) << "\n";
+    // Profile expression last (may contain spaces); used only for a
+    // consistency warning on restart.
+    chkfile << m_j0_expression << "\n";
+}
+
+void ICPHeatingModel::ReadCheckpointData(std::string const& dir)
+{
+    const std::string filename = dir + "/" + icp_controller_checkpoint_name;
+    std::ifstream chkfile{filename};
+    if (!chkfile.good()) {
+        // Checkpoint written before this feature existed (or by a run
+        // without the controller) — keep J_0_initial.
+        ablastr::warn_manager::WMRecordWarning(
+            "ICP heating",
+            "ICP power controller: no " + icp_controller_checkpoint_name
+            + " found in restart checkpoint " + dir
+            + "; starting the controller from J_0_initial.",
+            ablastr::warn_manager::WarnPriority::low);
+        return;
+    }
+
+    int version = 0;
+    int bootstrap_int = 1;
+    std::string chk_expression;
+    chkfile >> version;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        version == icp_controller_checkpoint_version,
+        "ICP power controller: unsupported " + icp_controller_checkpoint_name
+        + " format version in " + dir);
+    chkfile >> m_j0_current;
+    chkfile >> m_e_prev;
+    chkfile >> m_e_prev2;
+    chkfile >> m_windows_completed;
+    chkfile >> bootstrap_int;
+    chkfile >> std::ws;
+    std::getline(chkfile, chk_expression);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !chkfile.fail(),
+        "ICP power controller: failed to parse " + filename);
+    m_pid_bootstrap = (bootstrap_int != 0);
+
+    // The restored J_0 must respect the (possibly re-specified) clamps.
+    m_j0_current = std::clamp(m_j0_current, m_j0_min, m_j0_max);
+
+    if (chk_expression != m_j0_expression) {
+        ablastr::warn_manager::WMRecordWarning(
+            "ICP heating",
+            "ICP power controller: the amplitude expression in the restart "
+            "input differs from the one the checkpoint was written with.\n"
+            "  checkpoint: " + chk_expression + "\n"
+            "  input:      " + m_j0_expression,
+            ablastr::warn_manager::WarnPriority::medium);
+    }
+
+    if (ParallelDescriptor::IOProcessor()) {
+        std::ostringstream ss;
+        ss << "ICP power controller: restored J_0 = " << m_j0_current
+           << " A/m^2 and PID state from " << filename;
+        Print() << Utils::TextMsg::Info(ss.str());
     }
 }

@@ -16,6 +16,7 @@
 #include "EmbeddedBoundary/Enabled.H"
 #include "Fields.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+#include "FieldSolver/InductiveHeating/ICPHeatingModel.H"
 #ifdef WARPX_USE_FFT
 #   ifdef WARPX_DIM_RZ
 #       include "FieldSolver/SpectralSolver/SpectralSolverRZ.H"
@@ -275,6 +276,15 @@ WarpX::Evolve (int numsteps)
         if( electrostatic_solver_id != ElectrostaticSolverAlgo::None ||
             electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC )
         {
+            // ICP power controller: sample this step's absorbed power (and,
+            // once per controller period, update J_0). Must run after the
+            // momentum push of this step (which fills the power-deposition
+            // tracking buffers) and BEFORE the beforeEsolve Python callback,
+            // so user-side buffer reads/clears cannot corrupt a sample.
+            if (m_icp_heating_model && m_icp_heating_model->is_enabled()) {
+                m_icp_heating_model->TickPowerController(*mypc, cur_time, dt[0], step+1);
+            }
+
             ExecutePythonCallback("beforeEsolve");
 
             if (electrostatic_solver_id != ElectrostaticSolverAlgo::None) {

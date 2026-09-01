@@ -421,6 +421,18 @@ WarpX::WarpX ()
     if (WarpX::electrostatic_solver_id != ElectrostaticSolverAlgo::None)
     {
         m_icp_heating_model = std::make_unique<ICPHeatingModel>();
+
+        // The ICP power controller measures absorbed power from the
+        // power-deposition tracking buffers, so tracking must be on for
+        // every species regardless of the per-species input flag.
+        if (m_icp_heating_model->is_controller_enabled()) {
+            for (int i = 0; i < mypc->nSpecies(); ++i) {
+                mypc->GetParticleContainer(i).setEnablePowerDepositionTracking(true);
+            }
+            amrex::Print() << Utils::TextMsg::Info(
+                "ICP power controller: enable_power_deposition_tracking "
+                "force-enabled for all species.");
+        }
     }
 
     current_buffer_masks.resize(nlevs_max);

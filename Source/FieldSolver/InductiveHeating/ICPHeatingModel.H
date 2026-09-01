@@ -28,6 +28,7 @@
 #include <AMReX_REAL.H>
 #include <AMReX_Vector.H>
 
+#include <deque>
 #include <memory>
 #include <string>
 
@@ -63,10 +64,28 @@ enum class ICPIntegrator { Euler, AB2, RK2, RK4 };
  *   workhorse functions: SaveTransverseMomenta, RestoreTransverseMomenta,
  *   PushTransverseMomenta, DepositTransverseCurrent, ComputeEyRHS, and
  *   SetTransverseElectricField.
+ *
+ * PID power controller mode:
+ * When the amplitude is given as icp_heating.j0_amplitude(J_0,z,t), the
+ * scalar J_0 is adjusted every controller period by a velocity-form PID so
+ * that the domain-integrated, period-averaged inductive power absorbed by
+ * the plasma (measured from the per-species power-deposition tracking
+ * buffers, y-component) converges to icp_heating.P_target [W/m^2].
+ * See TickPowerController for the update law and gain conventions.
  */
 class ICPHeatingModel
 {
 public:
+    /** One record per completed controller averaging window. */
+    struct ControllerHistoryEntry
+    {
+        int step;                 ///< step at which the window closed
+        amrex::Real time;         ///< simulation time at which the window closed [s]
+        amrex::Real mean_power;   ///< window-averaged absorbed power P_bar [W/m^2]
+        amrex::Real error;        ///< normalized error e = (P_target - P_bar)/P_target
+        amrex::Real j0;           ///< J_0 amplitude after the update [A/m^2]
+    };
+
     ICPHeatingModel();
 
     /** Read user-defined model parameters. Called in constructor. */
@@ -92,6 +111,111 @@ public:
 
     /** Returns the drive frequency (Hz), used externally to check timestep constraints. */
     [[nodiscard]] amrex::Real get_frequency() const { return m_icp_frequency; }
+
+    /** Returns true if the PID power controller mode is active. */
+    [[nodiscard]] bool is_controller_enabled() const { return m_controller_enabled; }
+
+    // =========================================================================
+    // PID power controller
+    // =========================================================================
+
+    /**
+     * \brief Once-per-step controller tick: sample this step's absorbed
+     *        inductive power and, every controller period, update J_0.
+     *
+     * Called from WarpX::Evolve, after the step's momentum push (which fills
+     * the power-deposition tracking buffers) and before the beforeEsolve
+     * Python callback, so user-side buffer clears can never corrupt a sample.
+     * Never called at init time (the tracking buffers do not exist yet).
+     *
+     * Power sampling: for each species, the per-step absorbed power is the
+     * delta of the global sum of the tracking buffer's y-component since the
+     * previous step (see WarpXParticleContainer::samplePowerDepositionDelta).
+     * In 1D-Z the plain sum over cells is the domain-integrated power in
+     * W/m^2, because macroparticle weights are per unit area.
+     *
+     * PID update law (velocity/incremental form), applied when a window of
+     * n = round(P_controller_period/dt) steps completes:
+     *
+     *   P_bar = (sum of per-step powers) / n
+     *   e_k   = (P_target - P_bar) / P_target            (dimensionless)
+     *   J_0  <- clamp( J_0 * [ 1 + Kp*(e_k - e_{k-1})
+     *                            + Ki*e_k
+     *                            + Kd*(e_k - 2 e_{k-1} + e_{k-2}) ],
+     *                  J_0_min, J_0_max )
+     *
+     * This is the discrete velocity form of the textbook PID
+     * u = Kp'*e + Ki'*I + Kd'*de/dt with I += e*T: differencing consecutive
+     * outputs turns the integral term into Ki'*T*e_k, and the controller
+     * period T is folded into the gains (Ki = Ki'*T, Kd = Kd'/T). The
+     * integral history therefore accumulates in J_0 itself — there is no
+     * separate integral state and no windup at the clamps.
+     *
+     * Gain units: Kp, Ki, Kd are all DIMENSIONLESS per-update gains acting
+     * on the normalized error (e.g. Ki = 0.1 moves J_0 by 10% of the relative
+     * power error each controller period). Because the period is folded in,
+     * gains must be retuned if P_controller_period is changed. Kd = 0 is
+     * recommended: the derivative term amplifies the statistical noise of
+     * the PIC power measurement.
+     *
+     * The first m_ctrl_delay_periods windows measure and record history but
+     * do not update J_0, letting the plasma converge first. The first active
+     * update (and the first update after SetJ0) bootstraps
+     * e_{k-1} = e_{k-2} = e_k, so only the Ki term acts.
+     *
+     * \param[in] mpc   All particle species (power buffers sampled from here)
+     * \param[in] time  Simulation time at the end of the current step
+     * \param[in] dt    Timestep (used once to convert the period to steps)
+     * \param[in] step  Current step index (for history records)
+     */
+    void TickPowerController(
+        MultiParticleContainer& mpc,
+        amrex::Real time,
+        amrex::Real dt,
+        int step
+    );
+
+    /** Returns the current J_0 amplitude [A/m^2]. */
+    [[nodiscard]] amrex::Real GetJ0() const { return m_j0_current; }
+
+    /**
+     * \brief Set the J_0 amplitude [A/m^2] (clamped to [J_0_min, J_0_max]).
+     *
+     * Also restarts the averaging window (so power measured under the old
+     * amplitude is not mixed in) and re-bootstraps the PID error history
+     * (the next update is Ki-only). Must be called on all MPI ranks.
+     * Aborts if the controller mode is not enabled.
+     */
+    void SetJ0(amrex::Real j0);
+
+    /** Returns the mean absorbed power [W/m^2] of the last completed window
+     *  (0 before the first window completes). */
+    [[nodiscard]] amrex::Real GetLastMeanPower() const { return m_last_mean_power; }
+
+    /** Returns the recorded history of controller updates (bounded by
+     *  icp_heating.controller_history_size, oldest entries dropped first). */
+    [[nodiscard]] std::deque<ControllerHistoryEntry> const& GetControllerHistory() const
+    { return m_history; }
+
+    /**
+     * \brief Write the controller state to <dir>/ICPController_data.txt.
+     *
+     * Called from FlushFormatCheckpoint when writing a checkpoint. Writes on
+     * the IO processor only. The sidecar file is ignored by older code
+     * versions, so checkpoint compatibility is preserved.
+     */
+    void WriteCheckpointData(std::string const& dir) const;
+
+    /**
+     * \brief Restore the controller state from <dir>/ICPController_data.txt.
+     *
+     * Called at the end of ReadParameters when restarting from a checkpoint
+     * (unless icp_heating.restore_controller_from_checkpoint = 0). If the
+     * file is missing (e.g. checkpoint written by an older code version),
+     * prints a notice and keeps J_0_initial. Warns if the checkpointed
+     * profile expression differs from the current input.
+     */
+    void ReadCheckpointData(std::string const& dir);
 
     // =========================================================================
     // Top-level field update — called once per timestep from WarpXSolveFieldsES
@@ -304,12 +428,62 @@ private:
     amrex::Real m_z_min = 0.0;  ///< start of heating region [m]
     amrex::Real m_z_max = 0.0;  ///< end of heating region [m]
 
-    std::unique_ptr<amrex::Parser> m_j0_parser;     ///< J_0(z,t) amplitude profile
-    amrex::ParserExecutor<2>       m_j0_parser_exe; ///< compiled parser executor
+    std::unique_ptr<amrex::Parser> m_j0_parser;     ///< amplitude profile parser
+    /** Compiled executor over (z, t, J_0). In the legacy scalar and (z,t)
+     *  forms J_0 is registered but unused, so evaluation is unchanged. */
+    amrex::ParserExecutor<3>       m_j0_parser_exe;
+    std::string m_j0_expression;    ///< profile expression string (for checkpoint provenance)
 
     amrex::Real m_ey_max = 1.0e10;  ///< E_y field limiter [V/m]
 
     ICPIntegrator m_integrator = ICPIntegrator::Euler;  ///< selected time integrator
+
+    // -------------------------------------------------------------------------
+    // PID power controller parameters and state
+    // -------------------------------------------------------------------------
+
+    bool m_controller_enabled = false;  ///< true iff j0_amplitude(J_0,z,t) form given
+
+    amrex::Real m_j0_initial = 0.0;  ///< icp_heating.J_0_initial [A/m^2]
+    /** Current J_0 value passed to the amplitude parser. Kept at 1.0 in the
+     *  legacy (non-controller) forms, where the parser does not use it. */
+    amrex::Real m_j0_current = 1.0;
+    amrex::Real m_P_target = 0.0;    ///< target absorbed power [W/m^2]
+
+    amrex::Real m_ctrl_period_seconds = 0.0;  ///< controller period [s] (default 1/frequency)
+    int m_ctrl_period_steps = -1;             ///< period in steps; computed on first tick
+
+    /** PID gains. All three are DIMENSIONLESS per-update gains on the
+     *  normalized error e = (P_target - P_bar)/P_target: the controller
+     *  period T is folded in (Ki = Ki_continuous*T, Kd = Kd_continuous/T),
+     *  so they must be retuned if P_controller_period changes.
+     *  Kd = 0 (default) is recommended — the derivative term amplifies
+     *  PIC measurement noise. */
+    amrex::Real m_pid_kp = 0.2;
+    amrex::Real m_pid_ki = 0.1;
+    amrex::Real m_pid_kd = 0.0;
+
+    amrex::Real m_j0_min = 0.0;  ///< amplitude clamp [A/m^2] (default 0.01*J_0_initial)
+    amrex::Real m_j0_max = 0.0;  ///< amplitude clamp [A/m^2] (default 100*J_0_initial)
+
+    /** Number of controller periods to wait (measuring, not acting) before
+     *  the PID becomes active. */
+    int m_ctrl_delay_periods = 50;
+    int m_windows_completed = 0;  ///< completed averaging windows since start
+
+    amrex::Real m_power_accum = 0.0;    ///< sum of per-step powers in current window [W/m^2]
+    int m_steps_in_window = 0;          ///< steps accumulated in current window
+    amrex::Real m_last_mean_power = 0.0;  ///< P_bar of last completed window [W/m^2]
+
+    amrex::Real m_e_prev  = 0.0;  ///< e_{k-1}
+    amrex::Real m_e_prev2 = 0.0;  ///< e_{k-2}
+    /** True until the first active PID update (and again after SetJ0):
+     *  bootstraps e_{k-1} = e_{k-2} = e_k so the first update is Ki-only. */
+    bool m_pid_bootstrap = true;
+
+    bool m_restore_from_checkpoint = true;  ///< icp_heating.restore_controller_from_checkpoint
+    int m_history_capacity = 1000;          ///< icp_heating.controller_history_size
+    std::deque<ControllerHistoryEntry> m_history;  ///< bounded record of updates
 
     // -------------------------------------------------------------------------
     // State for multi-step integrators
