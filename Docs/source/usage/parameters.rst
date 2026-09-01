@@ -2728,6 +2728,89 @@ Maxwell solver: kinetic-fluid hybrid
     Based on results from :cite:t:`param-Stanier2020` it is recommended to use
     linear particles when using the hybrid-PIC model.
 
+ICP heating (1D electrostatic only)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A quasi-inductive (ICP-like) heating model for 1D electrostatic simulations.
+A prescribed transverse current :math:`J_{y,\mathrm{target}}(z,t) = J_0(z,t)\sin(\omega t)`
+is imposed in :math:`[z_\mathrm{min}, z_\mathrm{max}]` and :math:`E_y` is
+evolved as :math:`dE_y/dt = (J_{y,\mathrm{target}} - J_{y,\mathrm{cond}})/\epsilon_0`.
+
+* ``icp_heating.do_heating`` (`bool`) optional (default `0`)
+    Activates the ICP heating model. Requires a 1D build and an electrostatic solver.
+
+* ``icp_heating.frequency`` (`float`, in Hz)
+    Drive frequency of the imposed transverse current.
+
+* ``icp_heating.z_min``, ``icp_heating.z_max`` (`float`, in m)
+    Axial bounds of the heating region.
+
+* ``icp_heating.j0_amplitude`` (`float`, in A/m^2) or ``icp_heating.j0_amplitude(z,t)`` (`string`) or ``icp_heating.j0_amplitude(J_0,z,t)`` (`string`)
+    The current density amplitude. Exactly one of the three forms must be given:
+    a constant scalar, a fixed parser expression of ``(z,t)``, or a parser
+    expression of ``(J_0,z,t)`` whose scalar amplitude ``J_0`` is adjusted at
+    runtime by the PID power controller (see below).
+
+* ``icp_heating.ey_max`` (`float`, in V/m) optional (default `1e10`)
+    Hard limiter on the magnitude of :math:`E_y`.
+
+* ``icp_heating.integrator`` (`string`) optional (default ``euler``)
+    Time integrator for the :math:`E_y` ODE: ``euler``, ``ab2``, ``rk2`` or ``rk4``.
+
+When the ``j0_amplitude(J_0,z,t)`` form is used, a PID controller adjusts
+``J_0`` every controller period so that the domain-integrated, period-averaged
+inductive power absorbed by the plasma converges to a target. The absorbed
+power is measured from the per-species power-deposition tracking buffers
+(y-component), which are force-enabled for all species in this mode.
+Requires ``amr.max_level = 0``.
+
+* ``icp_heating.J_0_initial`` (`float`, in A/m^2)
+    Starting amplitude. Required in controller mode.
+
+* ``icp_heating.P_target`` (`float`, in W/m^2)
+    Target absorbed inductive power. Required in controller mode.
+
+* ``icp_heating.P_controller_period`` (`float`, in s) optional (default ``1/icp_heating.frequency``)
+    Averaging window and update period of the controller.
+
+* ``icp_heating.pid_kp``, ``icp_heating.pid_ki``, ``icp_heating.pid_kd`` (`float`) optional (defaults `0.2`, `0.1`, `0`)
+    PID gains of the velocity-form update
+
+    .. math::
+
+        J_0 \leftarrow J_0\,[\,1 + K_p (e_k - e_{k-1}) + K_i e_k
+            + K_d (e_k - 2 e_{k-1} + e_{k-2})\,],
+        \qquad e_k = \frac{P_\mathrm{target} - \bar{P}}{P_\mathrm{target}}.
+
+    All three gains are **dimensionless per-update gains** acting on the
+    normalized error: the controller period is folded into them
+    (:math:`K_i = K_i'\,T`, :math:`K_d = K_d'/T` relative to the
+    continuous-time gains), so they must be retuned if
+    ``P_controller_period`` changes. For example, ``pid_ki = 0.1`` moves
+    ``J_0`` by 10% of the relative power error each controller period.
+    Keeping ``pid_kd = 0`` (the default) is recommended, since the
+    derivative term amplifies the statistical noise of the PIC power
+    measurement.
+
+* ``icp_heating.J_0_min``, ``icp_heating.J_0_max`` (`float`, in A/m^2) optional (defaults ``0.01*J_0_initial``, ``100*J_0_initial``)
+    Clamps on ``J_0``. Set them explicitly if they must stay fixed across
+    restarts (the defaults scale with ``J_0_initial``).
+
+* ``icp_heating.controller_delay_N_periods`` (`int`) optional (default `50`)
+    Number of controller periods to wait before the PID becomes active.
+    During the delay the power is still measured and recorded in the history,
+    but ``J_0`` is not updated, letting the simulation converge first.
+
+* ``icp_heating.controller_history_size`` (`int`) optional (default `1000`)
+    Maximum number of controller updates kept in the in-memory history
+    (accessible from Python via ``get_icp_controller_history()``).
+
+* ``icp_heating.restore_controller_from_checkpoint`` (`bool`) optional (default `1`)
+    On a checkpoint restart, restore ``J_0`` and the PID state from the
+    ``ICPController_data.txt`` sidecar file written into each checkpoint.
+    Checkpoints written before this feature existed fall back to
+    ``J_0_initial`` with a printed notice.
+
 Grid types (collocated, staggered, hybrid)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
