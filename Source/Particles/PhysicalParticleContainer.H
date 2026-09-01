@@ -428,6 +428,11 @@ public:
         const warpx::particles::deposition::TemperatureDepositionType type,
         const warpx::particles::deposition::TemperatureDepositionPass pass) override;
 
+    /** Enable/disable J.E power deposition tracking for this species.
+     *  Used by the ICP power controller to force-enable tracking. */
+    void setEnablePowerDepositionTracking (bool enable) override
+    { m_enable_power_deposition_tracking = enable; }
+
 protected:
 
     /*

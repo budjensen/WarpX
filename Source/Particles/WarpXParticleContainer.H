@@ -646,6 +646,11 @@ protected:
      *  InitializePowerDepositionTracking; null/empty until tracking is enabled. */
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_power_deposition_tracking_mf;
 
+    /** Per-level snapshot of the global sum of each tracking component at the
+     *  last samplePowerDepositionDelta call. Zeroed whenever the buffer is
+     *  reset or reallocated, so deltas stay consistent with the buffer. */
+    amrex::Vector<std::array<amrex::Real, 3>> m_power_deposition_snapshot;
+
     /** (Re)allocate m_power_deposition_tracking_mf to match the given per-level
      *  BoxArray/DistributionMapping. Idempotent: a no-op if the existing MultiFabs
      *  already match. Self-heals after a regrid/load-balance event (which changes
@@ -709,9 +714,35 @@ public:
 
     /** Reset power deposition tracking data (zero all cells) for a given level.
      *
+     * Also zeroes the delta-sampling snapshot for that level, so consumers of
+     * samplePowerDepositionDelta (the ICP power controller) keep measuring
+     * exact per-step deltas across resets triggered from Python.
+     *
      * \param[in] lev refinement level
      */
     void resetPowerDepositionTracking (int lev);
+
+    /** Delta of the global sum of one power-tracking component since the
+     *  previous call (and update the stored snapshot).
+     *
+     * The sum is an MPI allreduce (identical result on all ranks). Returns 0
+     * if tracking is not enabled/allocated for this level. Used by the ICP
+     * power controller to sample the per-step absorbed power.
+     *
+     * \param[in] lev  refinement level
+     * \param[in] comp component index (0=x, 1=y, 2=z)
+     * \return sum(comp) - snapshot(comp), i.e. the power deposited since the
+     *         previous call [W/m^2 in 1D-Z]
+     */
+    amrex::Real samplePowerDepositionDelta (int lev, int comp);
+
+    /** Enable/disable power deposition tracking for this species at runtime.
+     *
+     * No-op in this base class (laser particles do not track power);
+     * overridden by PhysicalParticleContainer. Used by the ICP power
+     * controller to force-enable tracking for all species.
+     */
+    virtual void setEnablePowerDepositionTracking (bool /*enable*/) {}
 
     /** Gather power deposition tracking data from all boxes into a single spatial array.
      *

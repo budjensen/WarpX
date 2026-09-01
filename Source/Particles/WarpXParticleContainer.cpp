@@ -2456,6 +2456,7 @@ WarpXParticleContainer::InitializePowerDepositionTracking (
     bool const was_initialized = !m_power_deposition_tracking_mf.empty();
 
     m_power_deposition_tracking_mf.resize(ba.size());
+    m_power_deposition_snapshot.resize(ba.size(), {0.0_rt, 0.0_rt, 0.0_rt});
     for (int lev = 0; lev < static_cast<int>(ba.size()); ++lev) {
         auto& mf = m_power_deposition_tracking_mf[lev];
         bool const matches = (mf != nullptr) &&
@@ -2470,6 +2471,8 @@ WarpXParticleContainer::InitializePowerDepositionTracking (
             }
             mf = std::make_unique<amrex::MultiFab>(ba[lev], dm[lev], ncomps, 0);
             mf->setVal(0.0);
+            // Keep the delta-sampling snapshot consistent with the zeroed buffer
+            m_power_deposition_snapshot[lev] = {0.0_rt, 0.0_rt, 0.0_rt};
         }
     }
 }
@@ -2487,7 +2490,31 @@ void WarpXParticleContainer::resetPowerDepositionTracking (int lev)
     if (lev < static_cast<int>(m_power_deposition_tracking_mf.size()) &&
         m_power_deposition_tracking_mf[lev]) {
         m_power_deposition_tracking_mf[lev]->setVal(0.0);
+        // Keep the delta-sampling snapshot consistent with the zeroed buffer,
+        // so the ICP power controller's per-step deltas stay exact across
+        // resets triggered from Python.
+        if (lev < static_cast<int>(m_power_deposition_snapshot.size())) {
+            m_power_deposition_snapshot[lev] = {0.0_rt, 0.0_rt, 0.0_rt};
+        }
     }
+}
+
+amrex::Real WarpXParticleContainer::samplePowerDepositionDelta (int lev, int comp)
+{
+    AMREX_ALWAYS_ASSERT(comp >= 0 && comp < 3);
+
+    amrex::MultiFab const* mf = getPowerDepositionTracking(lev);
+    if (mf == nullptr) { return 0.0_rt; }
+
+    if (lev >= static_cast<int>(m_power_deposition_snapshot.size())) {
+        m_power_deposition_snapshot.resize(lev+1, {0.0_rt, 0.0_rt, 0.0_rt});
+    }
+
+    // MultiFab::sum performs the MPI reduction (same value on all ranks)
+    const amrex::Real total = mf->sum(comp);
+    const amrex::Real delta = total - m_power_deposition_snapshot[lev][comp];
+    m_power_deposition_snapshot[lev][comp] = total;
+    return delta;
 }
 
 void WarpXParticleContainer::gatherPowerDepositionTracking (
