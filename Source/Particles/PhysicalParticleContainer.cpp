@@ -1519,22 +1519,28 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
             amrex::ParticleReal const q_eff = q * static_cast<amrex::ParticleReal>(ion_lev ? ion_lev[ip] : 1);
             amrex::Real const wt = static_cast<amrex::Real>(wp_power[ip]);
 
+            // Bin by nearest-lower cell with floor (matches AMReX's own
+            // particle binning; plain int truncation rounds toward zero and
+            // would mis-bin a particle below prob_lo).
             int pi = 0, pj = 0, pk = 0;
 #if defined(WARPX_DIM_1D_Z)
-            pi = static_cast<int>((zp - power_tracking_plo[0]) * power_tracking_dxi[0]);
+            pi = static_cast<int>(amrex::Math::floor((zp - power_tracking_plo[0]) * power_tracking_dxi[0]));
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
-            pi = static_cast<int>((xp - power_tracking_plo[0]) * power_tracking_dxi[0]);
-            pk = static_cast<int>((zp - power_tracking_plo[1]) * power_tracking_dxi[1]);
+            pi = static_cast<int>(amrex::Math::floor((xp - power_tracking_plo[0]) * power_tracking_dxi[0]));
+            pk = static_cast<int>(amrex::Math::floor((zp - power_tracking_plo[1]) * power_tracking_dxi[1]));
 #else
-            pi = static_cast<int>((xp - power_tracking_plo[0]) * power_tracking_dxi[0]);
-            pj = static_cast<int>((yp - power_tracking_plo[1]) * power_tracking_dxi[1]);
-            pk = static_cast<int>((zp - power_tracking_plo[2]) * power_tracking_dxi[2]);
+            pi = static_cast<int>(amrex::Math::floor((xp - power_tracking_plo[0]) * power_tracking_dxi[0]));
+            pj = static_cast<int>(amrex::Math::floor((yp - power_tracking_plo[1]) * power_tracking_dxi[1]));
+            pk = static_cast<int>(amrex::Math::floor((zp - power_tracking_plo[2]) * power_tracking_dxi[2]));
 #endif
-            amrex::Gpu::Atomic::AddNoRet(&power_arr(pi,pj,pk,0),
+            // HostDevice::Atomic::Add is atomic on both host (omp atomic) and
+            // device; Gpu::Atomic::AddNoRet is a plain += in host code and is
+            // only safe there while OpenMP tiles never share a FAB.
+            amrex::HostDevice::Atomic::Add(&power_arr(pi,pj,pk,0),
                 wt*static_cast<amrex::Real>(q_eff*vx_mid*Exp));
-            amrex::Gpu::Atomic::AddNoRet(&power_arr(pi,pj,pk,1),
+            amrex::HostDevice::Atomic::Add(&power_arr(pi,pj,pk,1),
                 wt*static_cast<amrex::Real>(q_eff*vy_mid*Eyp));
-            amrex::Gpu::Atomic::AddNoRet(&power_arr(pi,pj,pk,2),
+            amrex::HostDevice::Atomic::Add(&power_arr(pi,pj,pk,2),
                 wt*static_cast<amrex::Real>(q_eff*vz_mid*Ezp));
         }
 
