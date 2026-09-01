@@ -7,6 +7,7 @@
 #include "Diagnostics/ParticleDiag/ParticleDiag.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "Fields.H"
+#include "FieldSolver/InductiveHeating/ICPHeatingModel.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXProfilerWrapper.H"
@@ -185,6 +186,8 @@ FlushFormatCheckpoint::WriteToFile (
 
     WriteReducedDiagsData(checkpointname);
 
+    WriteICPControllerData(checkpointname);
+
     VisMF::SetHeaderVersion(current_version);
 
 }
@@ -284,5 +287,16 @@ FlushFormatCheckpoint::WriteReducedDiagsData (std::string const & dir) const
     if (ParallelDescriptor::IOProcessor()) {
         auto & warpx = WarpX::GetInstance();
         warpx.reduced_diags->WriteCheckpointData(dir);
+    }
+}
+
+void
+FlushFormatCheckpoint::WriteICPControllerData (std::string const & dir) const
+{
+    auto & warpx = WarpX::GetInstance();
+    auto * icp = warpx.get_pointer_ICPHeatingModel();
+    if (icp && icp->is_controller_enabled()) {
+        // WriteCheckpointData itself writes on the IO processor only
+        icp->WriteCheckpointData(dir);
     }
 }

@@ -37,6 +37,11 @@ class FlushFormatCheckpoint final : public FlushFormatPlotfile
     void WriteDMaps (const std::string& dir, int nlev) const;
 
     void WriteReducedDiagsData (std::string const & dir) const;
+
+    /** Write the ICP power controller state sidecar file (if the controller
+     *  is enabled). Older code versions ignore the extra file, so checkpoint
+     *  compatibility is preserved in both directions. */
+    void WriteICPControllerData (std::string const & dir) const;
 };
 
 #endif // WARPX_FLUSHFORMATCHECKPOINT_H_
