@@ -2151,6 +2151,28 @@ amrex::ParticleReal WarpXParticleContainer::sumParticleCharge (bool local) const
     return this->sumParticleWeight(local) * this->charge;
 }
 
+amrex::ParticleReal WarpXParticleContainer::sumParticleWeightInZRange (
+    amrex::ParticleReal z_lo, amrex::ParticleReal z_hi, bool local) const {
+
+    using PType = typename WarpXParticleContainer::SuperParticleType;
+
+    amrex::ReduceOps<ReduceOpSum> reduce_ops;
+    auto r = amrex::ParticleReduce<amrex::ReduceData<Real>>(
+        *this,
+        [=] AMREX_GPU_DEVICE(const PType& p) noexcept -> amrex::GpuTuple<Real>
+        {
+            amrex::ParticleReal x, y, z;
+            get_particle_position(p, x, y, z);
+            return {(z >= z_lo && z <= z_hi) ? p.rdata(PIdx::w) : 0.0_rt};
+        },
+        reduce_ops);
+
+    amrex::Real Ws = amrex::get<0>(r);
+
+    if (!local) { ParallelDescriptor::ReduceRealSum(Ws); }
+    return Ws;
+}
+
 std::array<ParticleReal, 3> WarpXParticleContainer::meanParticleVelocity(bool local) {
 
     amrex::ParticleReal vx_total = 0.0_prt;

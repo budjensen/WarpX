@@ -439,6 +439,22 @@ public:
     amrex::ParticleReal sumParticleWeight (bool local = false) const;
     amrex::ParticleReal sumParticleEnergy (bool local = false) const;
 
+    /**
+     * \brief Sum of the weights of all particles whose z position lies in
+     * [z_lo, z_hi] (inclusive bounds). Valid in all geometries.
+     *
+     * In 1D-Z the weight is a per-area quantity [m^-2], so the returned sum
+     * divided by (z_hi - z_lo) is the region-averaged number density [m^-3],
+     * consistent with the normalization used by DepositNumberDensity.
+     *
+     * \param z_lo lower z bound of the region [m]
+     * \param z_hi upper z bound of the region [m]
+     * \param local if false (default), the result is all-reduced so that
+     *        every MPI rank receives the same value
+     */
+    amrex::ParticleReal sumParticleWeightInZRange (
+        amrex::ParticleReal z_lo, amrex::ParticleReal z_hi, bool local = false) const;
+
     std::array<amrex::ParticleReal, 3> meanParticleVelocity(bool local = false);
 
     amrex::ParticleReal maxParticleVelocity(bool local = false);
