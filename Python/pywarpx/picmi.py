@@ -3080,11 +3080,14 @@ class ICPHeating(picmistandard.base._ClassWithInit):
     controlled_j0_amplitude : str, optional
         Current density profile as a mathematical expression of (J_0, z, t),
         where the scalar amplitude J_0 is adjusted at runtime by a PID
-        controller so that the domain-integrated, period-averaged inductive
-        power absorbed by the plasma converges to P_target.
+        controller. Exactly one of two exclusive control modes must be
+        selected by the target kwarg: P_target (power control — converge the
+        domain-integrated, period-averaged absorbed inductive power) or
+        n_target (density control — converge the period-averaged number
+        density of all negative species inside a z-region).
         Example: "J_0*(1/(1+exp(-6283.2*(z-0.0075))) - 1/(1+exp(-785.4*(z-0.0175))))"
-        Requires J_0_initial and P_target. Power deposition tracking is
-        force-enabled for all species when this mode is active.
+        Requires J_0_initial. In power mode, power deposition tracking is
+        force-enabled for all species.
 
     J_0_initial : float, optional
         Starting amplitude J_0 in A/m^2 (required with controlled_j0_amplitude).
@@ -3094,21 +3097,42 @@ class ICPHeating(picmistandard.base._ClassWithInit):
         previous run.
 
     P_target : float, optional
-        Target absorbed inductive power in W/m^2 (required with
-        controlled_j0_amplitude).
+        Target absorbed inductive power in W/m^2 (power control mode).
+        Exactly one of P_target and n_target must be given with
+        controlled_j0_amplitude.
+
+    n_target : float, optional
+        Target plasma density in m^-3 (density control mode): the summed
+        number density of all negative-charge species, averaged over
+        [n_region_lo, n_region_hi]. Exactly one of P_target and n_target
+        must be given with controlled_j0_amplitude.
+
+    controller_period : float, optional
+        Averaging/update period of the controller in seconds
+        (default: 5/frequency).
 
     P_controller_period : float, optional
-        Averaging/update period of the controller in seconds
-        (default: 1/frequency).
+        Legacy alias of controller_period (kept for backward compatibility;
+        do not give both).
+
+    n_region_lo, n_region_hi : float, optional
+        z bounds in meters of the density measurement region (density control
+        mode only; default: the central 25% of the domain, i.e. the domain
+        midpoint +- L/8).
+
+    n_samples_per_update : int, optional
+        Number of evenly spaced density measurements per controller period
+        (density control mode only; default: 100, capped at one per step).
+        The window's mean density is the average of these samples.
 
     pid_kp, pid_ki, pid_kd : float, optional
         PID gains (defaults: 0.2, 0.1, 0). All three are DIMENSIONLESS
         per-update gains acting on the normalized error
-        e = (P_target - P_avg)/P_target: the controller period is folded into
-        them, so they must be retuned if P_controller_period changes
-        (e.g. pid_ki = 0.1 moves J_0 by 10% of the relative power error each
+        e = (target - measurement)/target: the controller period is folded
+        into them, so they must be retuned if controller_period changes
+        (e.g. pid_ki = 0.1 moves J_0 by 10% of the relative error each
         controller period). Keeping pid_kd = 0 is recommended — the
-        derivative term amplifies the statistical noise of the PIC power
+        derivative term amplifies the statistical noise of the PIC
         measurement.
 
     J_0_min, J_0_max : float, optional
@@ -3117,7 +3141,7 @@ class ICPHeating(picmistandard.base._ClassWithInit):
 
     controller_delay_N_periods : int, optional
         Number of controller periods to wait before the PID becomes active
-        (default: 50). During the delay the power is still measured and
+        (default: 10). During the delay the measurement is still taken and
         recorded in the history, but J_0 is not updated, letting the
         simulation converge first.
 
@@ -3194,7 +3218,25 @@ class ICPHeating(picmistandard.base._ClassWithInit):
     ...     ),
     ...     J_0_initial=3.5e3,  # A/m^2
     ...     P_target=4e3,  # W/m^2
-    ...     P_controller_period=1e-8,  # s (optional, defaults to 1/frequency)
+    ...     controller_period=1e-8,  # s (optional, defaults to 5/frequency)
+    ... )
+    >>> sim.add_icp_heating(icp)
+
+    PID-controlled amplitude targeting a specified plasma density (average
+    negative-species density in the central 25% of the domain by default):
+
+    >>> icp = picmi.ICPHeating(
+    ...     frequency=100e6,
+    ...     z_min=0.0,
+    ...     z_max=0.025,
+    ...     controlled_j0_amplitude=(
+    ...         "J_0*(1/(1+exp(-6283.185307179586*(z-0.0075)))"
+    ...         " - 1/(1+exp(-785.3981633974482*(z-0.0175))))"
+    ...     ),
+    ...     J_0_initial=3.5e3,  # A/m^2
+    ...     n_target=1e16,  # m^-3
+    ...     n_region_lo=0.010,  # m (optional)
+    ...     n_region_hi=0.015,  # m (optional)
     ... )
     >>> sim.add_icp_heating(icp)
     """
@@ -3204,7 +3246,12 @@ class ICPHeating(picmistandard.base._ClassWithInit):
     _controller_only_kwargs = (
         "J_0_initial",
         "P_target",
+        "n_target",
+        "controller_period",
         "P_controller_period",
+        "n_region_lo",
+        "n_region_hi",
+        "n_samples_per_update",
         "pid_kp",
         "pid_ki",
         "pid_kd",
@@ -3213,6 +3260,13 @@ class ICPHeating(picmistandard.base._ClassWithInit):
         "controller_delay_N_periods",
         "controller_history_size",
         "restore_controller_from_checkpoint",
+    )
+
+    # kwargs only meaningful in density control mode (with n_target)
+    _density_mode_only_kwargs = (
+        "n_region_lo",
+        "n_region_hi",
+        "n_samples_per_update",
     )
 
     def __init__(
@@ -3224,7 +3278,12 @@ class ICPHeating(picmistandard.base._ClassWithInit):
         controlled_j0_amplitude=None,
         J_0_initial=None,
         P_target=None,
+        n_target=None,
+        controller_period=None,
         P_controller_period=None,
+        n_region_lo=None,
+        n_region_hi=None,
+        n_samples_per_update=None,
         pid_kp=None,
         pid_ki=None,
         pid_kd=None,
@@ -3244,7 +3303,12 @@ class ICPHeating(picmistandard.base._ClassWithInit):
         self.controlled_j0_amplitude = controlled_j0_amplitude
         self.J_0_initial = J_0_initial
         self.P_target = P_target
+        self.n_target = n_target
+        self.controller_period = controller_period
         self.P_controller_period = P_controller_period
+        self.n_region_lo = n_region_lo
+        self.n_region_hi = n_region_hi
+        self.n_samples_per_update = n_samples_per_update
         self.pid_kp = pid_kp
         self.pid_ki = pid_ki
         self.pid_kd = pid_kd
@@ -3288,11 +3352,42 @@ class ICPHeating(picmistandard.base._ClassWithInit):
                     "J_0_initial must be specified and positive when using "
                     "controlled_j0_amplitude"
                 )
-            if self.P_target is None or self.P_target <= 0:
+            if (self.P_target is None) == (self.n_target is None):
                 raise ValueError(
-                    "P_target must be specified and positive when using "
+                    "exactly one of P_target (power control) and n_target "
+                    "(density control) must be specified with "
                     "controlled_j0_amplitude"
                 )
+            if self.P_target is not None and self.P_target <= 0:
+                raise ValueError("P_target must be positive")
+            if self.n_target is not None and self.n_target <= 0:
+                raise ValueError("n_target must be positive")
+            if (
+                self.controller_period is not None
+                and self.P_controller_period is not None
+            ):
+                raise ValueError(
+                    "specify only one of controller_period and its legacy "
+                    "alias P_controller_period"
+                )
+            if self.n_target is None:
+                for name in self._density_mode_only_kwargs:
+                    if getattr(self, name) is not None:
+                        raise ValueError(
+                            f"{name} requires density control mode (n_target)"
+                        )
+            else:
+                if (
+                    self.n_region_lo is not None
+                    and self.n_region_hi is not None
+                    and self.n_region_hi <= self.n_region_lo
+                ):
+                    raise ValueError("n_region_hi must be greater than n_region_lo")
+                if (
+                    self.n_samples_per_update is not None
+                    and self.n_samples_per_update < 1
+                ):
+                    raise ValueError("n_samples_per_update must be at least 1")
             if self.J_0_min is not None and self.J_0_min <= 0:
                 raise ValueError("J_0_min must be positive")
             J_0_min = (
@@ -3330,14 +3425,19 @@ class ICPHeating(picmistandard.base._ClassWithInit):
         pywarpx.icp_heating.integrator = self.integrator
 
         if self.controlled_j0_amplitude is not None:
-            # PID power controller mode
+            # PID controller mode (power or density, depending on the target)
             pywarpx.icp_heating.__setattr__(
                 "j0_amplitude(J_0,z,t)", self.controlled_j0_amplitude
             )
             # Bucket.attrlist() skips None values, so C++ defaults apply
             pywarpx.icp_heating.J_0_initial = self.J_0_initial
             pywarpx.icp_heating.P_target = self.P_target
+            pywarpx.icp_heating.n_target = self.n_target
+            pywarpx.icp_heating.controller_period = self.controller_period
             pywarpx.icp_heating.P_controller_period = self.P_controller_period
+            pywarpx.icp_heating.n_region_lo = self.n_region_lo
+            pywarpx.icp_heating.n_region_hi = self.n_region_hi
+            pywarpx.icp_heating.n_samples_per_update = self.n_samples_per_update
             pywarpx.icp_heating.pid_kp = self.pid_kp
             pywarpx.icp_heating.pid_ki = self.pid_ki
             pywarpx.icp_heating.pid_kd = self.pid_kd
