@@ -9,6 +9,7 @@
 #ifndef WARPX_PARTICLES_COLLISION_SCATTERING_PROCESS_H_
 #define WARPX_PARTICLES_COLLISION_SCATTERING_PROCESS_H_
 
+#include <AMReX_Algorithm.H>
 #include <AMReX_GpuContainers.H>
 #include <AMReX_Math.H>
 #include <AMReX_REAL.H>
@@ -69,8 +70,7 @@ public:
 
     static
     void sanityCheckEnergyGrid (
-                                const amrex::Vector<amrex::ParticleReal>& energies,
-                                amrex::ParticleReal dE
+                                const amrex::Vector<amrex::ParticleReal>& energies
                                 );
 
     struct Executor {
@@ -87,12 +87,18 @@ public:
         {
             if (E_coll < m_energy_lo) {
                 return m_sigma_lo;
-            } else if (E_coll > m_energy_hi) {
+            } else if (E_coll >= m_energy_hi) {
+                // Note the `>=`: `amrex::bisect` below requires E_coll to be strictly
+                // below the last grid point, otherwise it reads one past the end of
+                // the energy array. The interpolation would return the last
+                // cross-section value at that energy anyway.
                 return m_sigma_hi;
-            } else {
+            } else if (m_uniform) {
                 using amrex::Math::floor;
                 using amrex::Math::ceil;
-                // calculate index of bounding energy pairs
+                // Evenly spaced grid: the bracketing indices follow directly from the
+                // energy step. This keeps the common case out of the bisection search
+                // below, which matters because this runs in the particle loop.
                 amrex::ParticleReal temp = (E_coll - m_energy_lo) / m_dE;
                 const int idx_1 = static_cast<int>(floor(temp));
                 const int idx_2 = static_cast<int>(ceil(temp));
@@ -100,12 +106,29 @@ public:
                 // linearly interpolate to the given energy value
                 temp -= idx_1;
                 return m_sigmas_data[idx_1] + (m_sigmas_data[idx_2] - m_sigmas_data[idx_1]) * temp;
+            } else {
+                // Locate the pair of energy grid points bracketing E_coll using a
+                // bisection search. This does not assume an evenly spaced energy grid.
+                // `amrex::bisect` returns idx_1 such that
+                // m_energies_data[idx_1] <= E_coll < m_energies_data[idx_1 + 1].
+                const int idx_1 = amrex::bisect(m_energies_data, 0, m_grid_size - 1, E_coll);
+                const int idx_2 = idx_1 + 1;
+
+                // linearly interpolate to the given energy value
+                const amrex::ParticleReal temp =
+                    (E_coll - m_energies_data[idx_1])
+                    / (m_energies_data[idx_2] - m_energies_data[idx_1]);
+                return m_sigmas_data[idx_1] + (m_sigmas_data[idx_2] - m_sigmas_data[idx_1]) * temp;
             }
         }
 
+        amrex::ParticleReal* m_energies_data = nullptr;
         amrex::ParticleReal* m_sigmas_data = nullptr;
+        int m_grid_size = 0;
         amrex::ParticleReal m_energy_lo, m_energy_hi, m_sigma_lo, m_sigma_hi, m_dE;
         amrex::ParticleReal m_energy_penalty;
+        /** whether the energy grid is evenly spaced, enabling the fast index lookup */
+        bool m_uniform = false;
         ScatteringProcessType m_type;
     };
 
@@ -142,13 +165,12 @@ private:
     amrex::Vector<amrex::ParticleReal> m_energies;
 
 #ifdef AMREX_USE_GPU
+    amrex::Gpu::DeviceVector<amrex::ParticleReal> m_energies_d;
     amrex::Gpu::DeviceVector<amrex::ParticleReal> m_sigmas_d;
     Executor m_exe_d;
 #endif
     amrex::Gpu::HostVector<amrex::ParticleReal> m_sigmas_h;
     Executor m_exe_h;
-
-    int m_grid_size;
 };
 
 #endif // WARPX_PARTICLES_COLLISION_SCATTERING_PROCESS_H_

@@ -10,6 +10,8 @@
 
 #include "Utils/TextMsg.H"
 
+#include <algorithm>
+
 ScatteringProcess::ScatteringProcess (
                         const std::string& scattering_process,
                         const std::string& cross_section_file,
@@ -39,20 +41,44 @@ ScatteringProcess::init (const std::string& scattering_process, const amrex::Par
 {
     using namespace amrex::literals;
     m_name = scattering_process;
+    m_exe_h.m_energies_data = m_energies.data();
     m_exe_h.m_sigmas_data = m_sigmas_h.data();
 
     // save energy grid parameters for easy use
-    m_grid_size = static_cast<int>(m_energies.size());
+    const int grid_size = static_cast<int>(m_energies.size());
+    m_exe_h.m_grid_size = grid_size;
     m_exe_h.m_energy_lo = m_energies[0];
-    m_exe_h.m_energy_hi = m_energies[m_grid_size-1];
+    m_exe_h.m_energy_hi = m_energies[grid_size-1];
     m_exe_h.m_sigma_lo = m_sigmas_h[0];
-    m_exe_h.m_sigma_hi = m_sigmas_h[m_grid_size-1];
-    m_exe_h.m_dE = (m_exe_h.m_energy_hi - m_exe_h.m_energy_lo)/(m_grid_size - 1._prt);
+    m_exe_h.m_sigma_hi = m_sigmas_h[grid_size-1];
+    // The energy grid does not need to be evenly spaced. Track both the smallest and
+    // the largest spacing: comparing the two tells us whether the fast, search-free
+    // index lookup in `Executor::getCrossSection` can be used, and the smallest spacing
+    // is what a non-uniform grid reports as its representative energy step (e.g. to set
+    // the scan resolution when computing the maximum collision frequency), so that
+    // finely resolved regions of the grid are not skipped over.
+    amrex::ParticleReal dE_min = 0._prt;
+    amrex::ParticleReal dE_max = 0._prt;
+    if (grid_size > 1) {
+        dE_min = m_energies[grid_size-1] - m_energies[0];
+        for (int i = 1; i < grid_size; i++) {
+            const amrex::ParticleReal dE_i = m_energies[i] - m_energies[i-1];
+            dE_min = std::min(dE_min, dE_i);
+            dE_max = std::max(dE_max, dE_i);
+        }
+    }
+    // Same tolerance that the evenly-spaced grid check used historically.
+    m_exe_h.m_uniform = (grid_size > 1) && (dE_max - dE_min < dE_min / 100._prt);
+    // For an evenly spaced grid, keep the exact step that the fast lookup expects; this
+    // also reproduces the pre-existing cross-section values bit-for-bit.
+    m_exe_h.m_dE = m_exe_h.m_uniform
+                 ? (m_exe_h.m_energy_hi - m_exe_h.m_energy_lo) / (grid_size - 1._prt)
+                 : dE_min;
     m_exe_h.m_energy_penalty = energy;
     m_exe_h.m_type = parseProcessType(scattering_process);
 
     // sanity check cross-section energy grid
-    sanityCheckEnergyGrid(m_energies, m_exe_h.m_dE);
+    sanityCheckEnergyGrid(m_energies);
 
     // check that the cross-section is 0 at the energy cost if the energy
     // cost is > 0 - this is to prevent the possibility of negative left
@@ -66,8 +92,12 @@ ScatteringProcess::init (const std::string& scattering_process, const amrex::Par
 
 #ifdef AMREX_USE_GPU
     m_exe_d = m_exe_h;
+    m_energies_d.resize(m_energies.size());
     m_sigmas_d.resize(m_sigmas_h.size());
+    m_exe_d.m_energies_data = m_energies_d.data();
     m_exe_d.m_sigmas_data = m_sigmas_d.data();
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_energies.begin(), m_energies.end(),
+                          m_energies_d.begin());
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_sigmas_h.begin(), m_sigmas_h.end(),
                           m_sigmas_d.begin());
     amrex::Gpu::streamSynchronize();
@@ -118,16 +148,17 @@ ScatteringProcess::readCrossSectionFile (
 
 void
 ScatteringProcess::sanityCheckEnergyGrid (
-                                   const amrex::Vector<amrex::ParticleReal>& energies,
-                                   amrex::ParticleReal dE
+                                   const amrex::Vector<amrex::ParticleReal>& energies
                                    )
 {
-    // confirm that the input data for the cross-section was provided with
-    // equal energy steps, otherwise the linear interpolation will fail
+    // The energy grid does not need to be evenly spaced, but it must be sorted in
+    // strictly increasing order for the bisection search and linear interpolation
+    // used in `Executor::getCrossSection` to work correctly.
     for (unsigned i = 1; i < energies.size(); i++) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                                         (std::abs(energies[i] - energies[i-1] - dE) < dE / 100.0),
-                                         "Energy grid not evenly spaced."
+                                         (energies[i] > energies[i-1]),
+                                         "Cross-section energy grid must be sorted in "
+                                         "strictly increasing order."
                                          );
     }
 }
