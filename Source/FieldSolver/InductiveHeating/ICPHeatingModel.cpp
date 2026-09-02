@@ -124,26 +124,95 @@ void ICPHeatingModel::ReadParameters()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_j0_parser->symbols().count("J_0") == 1,
             "icp_heating.j0_amplitude(J_0,z,t) must reference the controlled "
-            "amplitude symbol J_0, otherwise the power controller has no effect");
+            "amplitude symbol J_0, otherwise the controller has no effect");
 
         utils::parser::getWithParser(pp_icp, "J_0_initial", m_j0_initial);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_j0_initial > 0.0_rt, "icp_heating.J_0_initial must be positive");
-        utils::parser::getWithParser(pp_icp, "P_target", m_P_target);
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_P_target > 0.0_rt, "icp_heating.P_target must be positive");
 
-        m_ctrl_period_seconds = 1.0_rt / m_icp_frequency;
-        utils::parser::queryWithParser(pp_icp, "P_controller_period", m_ctrl_period_seconds);
+        // Control-mode selection: exactly one of the two targets picks what
+        // the PID regulates by scaling J_0.
+        const bool has_P_target = pp_icp.contains("P_target");
+        const bool has_n_target = pp_icp.contains("n_target");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            static_cast<int>(has_P_target) + static_cast<int>(has_n_target) == 1,
+            "icp_heating: exactly one of P_target (power control) or "
+            "n_target (density control) must be specified");
+        if (has_P_target) {
+            m_control_mode = ICPControlMode::Power;
+            utils::parser::getWithParser(pp_icp, "P_target", m_P_target);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_P_target > 0.0_rt, "icp_heating.P_target must be positive");
+            // Density-mode keys are meaningless here — catch stale inputs.
+            for (auto const* key : {"n_region_lo", "n_region_hi",
+                                    "n_samples_per_update"}) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    !pp_icp.contains(key),
+                    "icp_heating." + std::string(key) +
+                    " requires density control mode (icp_heating.n_target)");
+            }
+        } else {
+            m_control_mode = ICPControlMode::Density;
+            utils::parser::getWithParser(pp_icp, "n_target", m_n_target);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_n_target > 0.0_rt, "icp_heating.n_target must be positive");
+
+            // Density measurement region: default is the central 25% of the
+            // domain (midpoint +- L/8). Geom(0) is valid here: geometry is
+            // built by the AmrCore base class before the WarpX constructor
+            // body (which constructs this model) runs.
+            const auto& geom = WarpX::GetInstance().Geom(0);
+            const amrex::Real prob_lo = geom.ProbLo(0);  // 1D-Z: index 0 is z
+            const amrex::Real prob_hi = geom.ProbHi(0);
+            const amrex::Real zc = 0.5_rt * (prob_lo + prob_hi);
+            const amrex::Real L  = prob_hi - prob_lo;
+            m_n_region_lo = zc - 0.125_rt * L;
+            m_n_region_hi = zc + 0.125_rt * L;
+            utils::parser::queryWithParser(pp_icp, "n_region_lo", m_n_region_lo);
+            utils::parser::queryWithParser(pp_icp, "n_region_hi", m_n_region_hi);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                prob_lo <= m_n_region_lo && m_n_region_lo < m_n_region_hi
+                && m_n_region_hi <= prob_hi,
+                "icp_heating: must satisfy prob_lo <= n_region_lo < "
+                "n_region_hi <= prob_hi");
+
+            utils::parser::queryWithParser(
+                pp_icp, "n_samples_per_update", m_n_samples_per_update);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_n_samples_per_update >= 1,
+                "icp_heating.n_samples_per_update must be at least 1");
+        }
+
+        // Controller period: one key for both modes. P_controller_period is
+        // kept as a legacy alias from the power-only controller version.
+        const bool has_period = pp_icp.contains("controller_period");
+        const bool has_legacy_period = pp_icp.contains("P_controller_period");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(has_period && has_legacy_period),
+            "icp_heating: specify only one of controller_period and its "
+            "legacy alias P_controller_period");
+        m_ctrl_period_seconds = 5.0_rt / m_icp_frequency;
+        if (has_legacy_period) {
+            utils::parser::getWithParser(
+                pp_icp, "P_controller_period", m_ctrl_period_seconds);
+            if (ParallelDescriptor::IOProcessor()) {
+                Print() << Utils::TextMsg::Info(
+                    "icp_heating.P_controller_period is a legacy alias; "
+                    "prefer icp_heating.controller_period");
+            }
+        } else {
+            utils::parser::queryWithParser(
+                pp_icp, "controller_period", m_ctrl_period_seconds);
+        }
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_ctrl_period_seconds > 0.0_rt,
-            "icp_heating.P_controller_period must be positive");
+            "icp_heating.controller_period must be positive");
 
         // Gains are dimensionless per-update gains acting on the normalized
-        // error e = (P_target - P_bar)/P_target; the controller period is
-        // folded into them (see TickPowerController), so they must be
-        // retuned if P_controller_period changes. Kd = 0 is recommended:
-        // the derivative term amplifies PIC measurement noise.
+        // error e = (target - measurement)/target; the controller period is
+        // folded into them (see TickController), so they must be retuned if
+        // controller_period changes. Kd = 0 is recommended: the derivative
+        // term amplifies PIC measurement noise.
         utils::parser::queryWithParser(pp_icp, "pid_kp", m_pid_kp);
         utils::parser::queryWithParser(pp_icp, "pid_ki", m_pid_ki);
         utils::parser::queryWithParser(pp_icp, "pid_kd", m_pid_kd);
@@ -170,12 +239,12 @@ void ICPHeatingModel::ReadParameters()
 
         const ParmParse pp_amr("amr");
 
-        // The controller samples the level-0 power buffers only.
+        // The controller samples the level-0 buffers/particles only.
         int max_level = 0;
         pp_amr.query("max_level", max_level);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             max_level == 0,
-            "icp_heating power controller requires amr.max_level = 0");
+            "icp_heating controller requires amr.max_level = 0");
 
         m_j0_current = m_j0_initial;
 
@@ -192,7 +261,9 @@ void ICPHeatingModel::ReadParameters()
             "icp_heating: the amplitude expression references J_0, but the "
             "controller form j0_amplitude(J_0,z,t) was not used; J_0 would "
             "silently evaluate to 1");
-        for (auto const* key : {"J_0_initial", "P_target", "P_controller_period",
+        for (auto const* key : {"J_0_initial", "P_target", "n_target",
+                                "controller_period", "P_controller_period",
+                                "n_region_lo", "n_region_hi", "n_samples_per_update",
                                 "pid_kp", "pid_ki", "pid_kd", "J_0_min", "J_0_max",
                                 "controller_delay_N_periods", "controller_history_size",
                                 "restore_controller_from_checkpoint"}) {
@@ -229,10 +300,20 @@ void ICPHeatingModel::ReadParameters()
                 << "  E_y field limiter:   " << m_ey_max          << " V/m\n"
                 << "  Integrator:          " << integrator_str     << "\n";
         if (m_controller_enabled) {
-            Print() << "  PID power controller:\n"
-                    << "    J_0 (initial/restored): " << m_j0_current << " A/m^2\n"
-                    << "    P_target:               " << m_P_target << " W/m^2\n"
-                    << "    Controller period:      " << m_ctrl_period_seconds << " s\n"
+            const bool power_mode = (m_control_mode == ICPControlMode::Power);
+            Print() << "  PID " << (power_mode ? "power" : "density")
+                    << " controller:\n"
+                    << "    J_0 (initial/restored): " << m_j0_current << " A/m^2\n";
+            if (power_mode) {
+                Print() << "    P_target:               " << m_P_target << " W/m^2\n";
+            } else {
+                Print() << "    n_target:               " << m_n_target << " m^-3\n"
+                        << "    Measurement region:     z = [" << m_n_region_lo
+                        << ", " << m_n_region_hi << "] m\n"
+                        << "    Density samples/update: " << m_n_samples_per_update
+                        << " (evenly spaced)\n";
+            }
+            Print() << "    Controller period:      " << m_ctrl_period_seconds << " s\n"
                     << "    Gains (Kp, Ki, Kd):     " << m_pid_kp << ", " << m_pid_ki
                     << ", " << m_pid_kd
                     << "  (dimensionless, per controller period)\n"
@@ -835,10 +916,36 @@ void ICPHeatingModel::ApplyRK4Update(
 }
 
 // =============================================================================
-// PID power controller
+// PID controller (power or density mode)
 // =============================================================================
 
-void ICPHeatingModel::TickPowerController(
+void ICPHeatingModel::InitDensityControl(MultiParticleContainer const& mpc)
+{
+    if (m_control_mode != ICPControlMode::Density) { return; }
+
+    m_negative_species.clear();
+    std::string species_list;
+    const auto names = mpc.GetSpeciesNames();
+    for (int i = 0; i < mpc.nSpecies(); ++i) {
+        if (mpc.GetParticleContainer(i).getCharge() < 0.0_rt) {
+            m_negative_species.push_back(i);
+            if (!species_list.empty()) { species_list += ", "; }
+            species_list += names[i];
+        }
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_negative_species.empty(),
+        "icp_heating density controller: no species with negative charge "
+        "found; the plasma density measurement would always be zero");
+
+    if (ParallelDescriptor::IOProcessor()) {
+        Print() << Utils::TextMsg::Info(
+            "ICP density controller: regulating the summed density of "
+            "negative species [" + species_list + "]");
+    }
+}
+
+void ICPHeatingModel::TickController(
     MultiParticleContainer& mpc,
     amrex::Real time,
     amrex::Real dt,
@@ -846,38 +953,72 @@ void ICPHeatingModel::TickPowerController(
 {
     if (!m_do_icp_heating || !m_controller_enabled) { return; }
 
-    WARPX_PROFILE("ICPHeatingModel::TickPowerController");
+    WARPX_PROFILE("ICPHeatingModel::TickController");
 
-    // One-time conversion of the controller period to a whole number of steps
+    const bool power_mode = (m_control_mode == ICPControlMode::Power);
+
+    // One-time conversion of the controller period to a whole number of
+    // steps, and of the requested density samples per window to a sampling
+    // stride (at most one sample per step).
     if (m_ctrl_period_steps < 0) {
         m_ctrl_period_steps = std::max(
             1, static_cast<int>(std::round(m_ctrl_period_seconds / dt)));
+        if (!power_mode) {
+            m_n_sample_interval = std::max(
+                1, m_ctrl_period_steps / m_n_samples_per_update);
+        }
         if (ParallelDescriptor::IOProcessor()) {
             std::ostringstream ss;
-            ss << "ICP power controller: period of " << m_ctrl_period_seconds
+            ss << "ICP " << (power_mode ? "power" : "density")
+               << " controller: period of " << m_ctrl_period_seconds
                << " s = " << m_ctrl_period_steps << " steps ("
                << m_ctrl_period_steps * dt << " s effective)";
+            if (!power_mode) {
+                ss << "; density sampled every " << m_n_sample_interval
+                   << " step(s)";
+            }
             Print() << Utils::TextMsg::Info(ss.str());
         }
     }
 
-    // Absorbed inductive power this step [W/m^2]: delta of the running sum of
-    // the tracking buffer's y-component, summed over all species. The sum is
-    // an MPI allreduce, so the result (and J_0) is identical on every rank.
-    Real step_power = 0.0_rt;
-    for (int i = 0; i < mpc.nSpecies(); ++i) {
-        step_power += mpc.GetParticleContainer(i).samplePowerDepositionDelta(0, 1);
+    ++m_steps_in_window;
+
+    if (power_mode) {
+        // Absorbed inductive power this step [W/m^2]: delta of the running
+        // sum of the tracking buffer's y-component, summed over all species.
+        // The sum is an MPI allreduce, so the result (and J_0) is identical
+        // on every rank.
+        Real step_power = 0.0_rt;
+        for (int i = 0; i < mpc.nSpecies(); ++i) {
+            step_power += mpc.GetParticleContainer(i).samplePowerDepositionDelta(0, 1);
+        }
+        m_meas_accum += step_power;
+    } else if (m_steps_in_window % m_n_sample_interval == 0) {
+        // Region-averaged plasma density sample [m^-3]: summed weight of the
+        // negative species inside the region over the region length (weights
+        // are per-area in 1D-Z). The weight sum is an MPI allreduce, and the
+        // sampling cadence depends only on rank-identical counters, so the
+        // collective runs on every rank and J_0 stays rank-identical.
+        Real wsum = 0.0_rt;
+        for (const int i : m_negative_species) {
+            wsum += mpc.GetParticleContainer(i).sumParticleWeightInZRange(
+                m_n_region_lo, m_n_region_hi);
+        }
+        m_meas_accum += wsum / (m_n_region_hi - m_n_region_lo);
+        ++m_samples_in_window;
     }
-    m_power_accum += step_power;
 
-    if (++m_steps_in_window < m_ctrl_period_steps) { return; }
+    if (m_steps_in_window < m_ctrl_period_steps) { return; }
 
-    // Averaging window complete
-    const Real pbar = m_power_accum / static_cast<Real>(m_steps_in_window);
-    m_last_mean_power = pbar;
+    // Averaging window complete. In power mode every step contributed one
+    // measurement; in density mode only the sampled steps did.
+    const int n_meas = power_mode ? m_steps_in_window : m_samples_in_window;
+    const Real mbar = m_meas_accum / static_cast<Real>(n_meas);
+    m_last_measurement = mbar;
     ++m_windows_completed;
 
-    const Real e_k = (m_P_target - pbar) / m_P_target;
+    const Real target = power_mode ? m_P_target : m_n_target;
+    const Real e_k = (target - mbar) / target;
 
     if (m_windows_completed > m_ctrl_delay_periods) {
         // Velocity-form PID update (see the header for the derivation and
@@ -899,14 +1040,15 @@ void ICPHeatingModel::TickPowerController(
     // m_pid_bootstrap remains true so the first active update is Ki-only.
 
     if (m_history_capacity > 0) {
-        m_history.push_back({step, time, pbar, e_k, m_j0_current});
+        m_history.push_back({step, time, mbar, e_k, m_j0_current});
         if (static_cast<int>(m_history.size()) > m_history_capacity) {
             m_history.pop_front();
         }
     }
 
-    m_power_accum = 0.0_rt;
+    m_meas_accum = 0.0_rt;
     m_steps_in_window = 0;
+    m_samples_in_window = 0;
 }
 
 void ICPHeatingModel::SetJ0(amrex::Real j0)
@@ -917,10 +1059,11 @@ void ICPHeatingModel::SetJ0(amrex::Real j0)
         "(icp_heating.j0_amplitude(J_0,z,t))");
 
     m_j0_current = std::clamp(j0, m_j0_min, m_j0_max);
-    // Restart the averaging window (do not mix power measured under two
+    // Restart the averaging window (do not mix measurements taken under two
     // different amplitudes) and re-bootstrap the PID error history.
-    m_power_accum = 0.0_rt;
+    m_meas_accum = 0.0_rt;
     m_steps_in_window = 0;
+    m_samples_in_window = 0;
     m_pid_bootstrap = true;
 }
 
@@ -930,7 +1073,10 @@ void ICPHeatingModel::SetJ0(amrex::Real j0)
 
 namespace
 {
-    constexpr int icp_controller_checkpoint_version = 1;
+    // Version history:
+    //   1: power-only controller; no mode line
+    //   2: adds the control-mode token ("power"/"density") as line 2
+    constexpr int icp_controller_checkpoint_version = 2;
     const std::string icp_controller_checkpoint_name = "ICPController_data.txt";
 }
 
@@ -943,10 +1089,11 @@ void ICPHeatingModel::WriteCheckpointData(std::string const& dir) const
     std::ofstream chkfile{filename, std::ofstream::out};
     if (!chkfile.good()) {
         WARPX_ABORT_WITH_MESSAGE(
-            "ICP power controller: could not open checkpoint file " + filename);
+            "ICP controller: could not open checkpoint file " + filename);
     }
     chkfile.precision(17);
     chkfile << icp_controller_checkpoint_version << "\n";
+    chkfile << (m_control_mode == ICPControlMode::Power ? "power" : "density") << "\n";
     chkfile << m_j0_current << "\n";
     chkfile << m_e_prev << "\n";
     chkfile << m_e_prev2 << "\n";
@@ -966,7 +1113,7 @@ void ICPHeatingModel::ReadCheckpointData(std::string const& dir)
         // without the controller) — keep J_0_initial.
         ablastr::warn_manager::WMRecordWarning(
             "ICP heating",
-            "ICP power controller: no " + icp_controller_checkpoint_name
+            "ICP controller: no " + icp_controller_checkpoint_name
             + " found in restart checkpoint " + dir
             + "; starting the controller from J_0_initial.",
             ablastr::warn_manager::WarnPriority::low);
@@ -978,28 +1125,72 @@ void ICPHeatingModel::ReadCheckpointData(std::string const& dir)
     std::string chk_expression;
     chkfile >> version;
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        version == icp_controller_checkpoint_version,
-        "ICP power controller: unsupported " + icp_controller_checkpoint_name
+        version >= 1 && version <= icp_controller_checkpoint_version,
+        "ICP controller: unsupported " + icp_controller_checkpoint_name
         + " format version in " + dir);
-    chkfile >> m_j0_current;
-    chkfile >> m_e_prev;
-    chkfile >> m_e_prev2;
-    chkfile >> m_windows_completed;
+
+    // Version 1 predates the density mode and implies power mode.
+    ICPControlMode chk_mode = ICPControlMode::Power;
+    if (version >= 2) {
+        std::string mode_str;
+        chkfile >> mode_str;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            mode_str == "power" || mode_str == "density",
+            "ICP controller: unknown control mode '" + mode_str + "' in " + filename);
+        chk_mode = (mode_str == "power") ? ICPControlMode::Power
+                                         : ICPControlMode::Density;
+    }
+
+    Real chk_j0 = 0.0_rt;
+    Real chk_e_prev = 0.0_rt;
+    Real chk_e_prev2 = 0.0_rt;
+    int chk_windows = 0;
+    chkfile >> chk_j0;
+    chkfile >> chk_e_prev;
+    chkfile >> chk_e_prev2;
+    chkfile >> chk_windows;
     chkfile >> bootstrap_int;
     chkfile >> std::ws;
     std::getline(chkfile, chk_expression);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !chkfile.fail(),
-        "ICP power controller: failed to parse " + filename);
-    m_pid_bootstrap = (bootstrap_int != 0);
+        "ICP controller: failed to parse " + filename);
 
     // The restored J_0 must respect the (possibly re-specified) clamps.
-    m_j0_current = std::clamp(m_j0_current, m_j0_min, m_j0_max);
+    m_j0_current = std::clamp(chk_j0, m_j0_min, m_j0_max);
+    m_windows_completed = chk_windows;
+
+    if (chk_mode == m_control_mode) {
+        // Same mode: full restore — the PID continues seamlessly.
+        m_e_prev = chk_e_prev;
+        m_e_prev2 = chk_e_prev2;
+        m_pid_bootstrap = (bootstrap_int != 0);
+    } else {
+        // Mode switch across the restart (e.g. converge under power control,
+        // then hold density): the checkpointed error history is in the other
+        // mode's normalization and must not seed this mode's PID. Keep J_0
+        // and windows_completed (the plasma is already converged, so the
+        // startup delay stays served) but re-bootstrap the error history.
+        m_e_prev = 0.0_rt;
+        m_e_prev2 = 0.0_rt;
+        m_pid_bootstrap = true;
+        const auto mode_name = [](ICPControlMode m) {
+            return (m == ICPControlMode::Power) ? std::string("power")
+                                                : std::string("density");
+        };
+        ablastr::warn_manager::WMRecordWarning(
+            "ICP heating",
+            "ICP controller: the checkpoint was written in " + mode_name(chk_mode)
+            + " control mode but this run uses " + mode_name(m_control_mode)
+            + " control mode; restored J_0 and windows_completed only and "
+            "re-bootstrapped the PID error history.",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
 
     if (chk_expression != m_j0_expression) {
         ablastr::warn_manager::WMRecordWarning(
             "ICP heating",
-            "ICP power controller: the amplitude expression in the restart "
+            "ICP controller: the amplitude expression in the restart "
             "input differs from the one the checkpoint was written with.\n"
             "  checkpoint: " + chk_expression + "\n"
             "  input:      " + m_j0_expression,
@@ -1008,7 +1199,7 @@ void ICPHeatingModel::ReadCheckpointData(std::string const& dir)
 
     if (ParallelDescriptor::IOProcessor()) {
         std::ostringstream ss;
-        ss << "ICP power controller: restored J_0 = " << m_j0_current
+        ss << "ICP controller: restored J_0 = " << m_j0_current
            << " A/m^2 and PID state from " << filename;
         Print() << Utils::TextMsg::Info(ss.str());
     }

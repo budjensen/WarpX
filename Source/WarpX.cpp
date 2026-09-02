@@ -422,16 +422,20 @@ WarpX::WarpX ()
     {
         m_icp_heating_model = std::make_unique<ICPHeatingModel>();
 
-        // The ICP power controller measures absorbed power from the
-        // power-deposition tracking buffers, so tracking must be on for
-        // every species regardless of the per-species input flag.
-        if (m_icp_heating_model->is_controller_enabled()) {
+        // Power mode measures absorbed power from the power-deposition
+        // tracking buffers, so tracking must be on for every species
+        // regardless of the per-species input flag. Density mode instead
+        // caches the negative-charge species whose summed density it
+        // regulates (species charge is set by this point).
+        if (m_icp_heating_model->GetControlMode() == ICPControlMode::Power) {
             for (int i = 0; i < mypc->nSpecies(); ++i) {
                 mypc->GetParticleContainer(i).setEnablePowerDepositionTracking(true);
             }
             amrex::Print() << Utils::TextMsg::Info(
                 "ICP power controller: enable_power_deposition_tracking "
                 "force-enabled for all species.");
+        } else if (m_icp_heating_model->GetControlMode() == ICPControlMode::Density) {
+            m_icp_heating_model->InitDensityControl(*mypc);
         }
     }
 

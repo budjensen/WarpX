@@ -276,13 +276,15 @@ WarpX::Evolve (int numsteps)
         if( electrostatic_solver_id != ElectrostaticSolverAlgo::None ||
             electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC )
         {
-            // ICP power controller: sample this step's absorbed power (and,
-            // once per controller period, update J_0). Must run after the
-            // momentum push of this step (which fills the power-deposition
-            // tracking buffers) and BEFORE the beforeEsolve Python callback,
-            // so user-side buffer reads/clears cannot corrupt a sample.
+            // ICP controller: accumulate this step's measurement — absorbed
+            // power or region-averaged plasma density, depending on the
+            // control mode — and, once per controller period, update J_0.
+            // Must run after the momentum push of this step (which fills the
+            // power-deposition tracking buffers) and BEFORE the beforeEsolve
+            // Python callback, so user-side buffer reads/clears cannot
+            // corrupt a power sample.
             if (m_icp_heating_model && m_icp_heating_model->is_enabled()) {
-                m_icp_heating_model->TickPowerController(*mypc, cur_time, dt[0], step+1);
+                m_icp_heating_model->TickController(*mypc, cur_time, dt[0], step+1);
             }
 
             ExecutePythonCallback("beforeEsolve");

@@ -47,6 +47,15 @@
 enum class ICPIntegrator { Euler, AB2, RK2, RK4 };
 
 /**
+ * \brief Selects what the PID controller regulates by scaling J_0.
+ *
+ * The modes are exclusive: a run sets exactly one of icp_heating.P_target
+ * (Power) or icp_heating.n_target (Density). None means the controller
+ * form j0_amplitude(J_0,z,t) is not in use.
+ */
+enum class ICPControlMode { None, Power, Density };
+
+/**
  * \brief Implements a quasi-inductive (ICP-like) heating model for 1D ES PIC.
  *
  * A prescribed transverse current J_y_target(z,t) = J_0(z)*sin(omega*t) is
@@ -65,13 +74,18 @@ enum class ICPIntegrator { Euler, AB2, RK2, RK4 };
  *   PushTransverseMomenta, DepositTransverseCurrent, ComputeEyRHS, and
  *   SetTransverseElectricField.
  *
- * PID power controller mode:
+ * PID controller mode:
  * When the amplitude is given as icp_heating.j0_amplitude(J_0,z,t), the
- * scalar J_0 is adjusted every controller period by a velocity-form PID so
- * that the domain-integrated, period-averaged inductive power absorbed by
- * the plasma (measured from the per-species power-deposition tracking
- * buffers, y-component) converges to icp_heating.P_target [W/m^2].
- * See TickPowerController for the update law and gain conventions.
+ * scalar J_0 is adjusted every controller period by a velocity-form PID.
+ * Exactly one of two exclusive control modes is selected by the inputs:
+ * - Power (icp_heating.P_target [W/m^2]): converges the domain-integrated,
+ *   period-averaged inductive power absorbed by the plasma (measured from
+ *   the per-species power-deposition tracking buffers, y-component).
+ * - Density (icp_heating.n_target [m^-3]): converges the period-averaged
+ *   number density of all negative-charge species (summed) inside a z-region
+ *   [icp_heating.n_region_lo, n_region_hi] (default: central 25% of the
+ *   domain), sampled icp_heating.n_samples_per_update times per period.
+ * See TickController for the update law and gain conventions.
  */
 class ICPHeatingModel
 {
@@ -81,8 +95,10 @@ public:
     {
         int step;                 ///< step at which the window closed
         amrex::Real time;         ///< simulation time at which the window closed [s]
-        amrex::Real mean_power;   ///< window-averaged absorbed power P_bar [W/m^2]
-        amrex::Real error;        ///< normalized error e = (P_target - P_bar)/P_target
+        /** Window-averaged measurement: absorbed power P_bar [W/m^2] in
+         *  Power mode, region-averaged density n_bar [m^-3] in Density mode. */
+        amrex::Real measurement;
+        amrex::Real error;        ///< normalized error e = (target - measurement)/target
         amrex::Real j0;           ///< J_0 amplitude after the update [A/m^2]
     };
 
@@ -120,29 +136,39 @@ public:
     [[nodiscard]] bool is_controller_enabled() const { return m_controller_enabled; }
 
     // =========================================================================
-    // PID power controller
+    // PID controller (power or density mode)
     // =========================================================================
 
     /**
-     * \brief Once-per-step controller tick: sample this step's absorbed
-     *        inductive power and, every controller period, update J_0.
+     * \brief Once-per-step controller tick: accumulate this window's
+     *        measurement (absorbed power or plasma density, depending on the
+     *        control mode) and, every controller period, update J_0.
      *
      * Called from WarpX::Evolve, after the step's momentum push (which fills
      * the power-deposition tracking buffers) and before the beforeEsolve
      * Python callback, so user-side buffer clears can never corrupt a sample.
      * Never called at init time (the tracking buffers do not exist yet).
+     * Must run on all MPI ranks every step: both measurements are MPI
+     * collectives.
      *
-     * Power sampling: for each species, the per-step absorbed power is the
-     * delta of the global sum of the tracking buffer's y-component since the
-     * previous step (see WarpXParticleContainer::samplePowerDepositionDelta).
-     * In 1D-Z the plain sum over cells is the domain-integrated power in
-     * W/m^2, because macroparticle weights are per unit area.
+     * Power sampling (every step): for each species, the per-step absorbed
+     * power is the delta of the global sum of the tracking buffer's
+     * y-component since the previous step (see
+     * WarpXParticleContainer::samplePowerDepositionDelta). In 1D-Z the plain
+     * sum over cells is the domain-integrated power in W/m^2, because
+     * macroparticle weights are per unit area.
+     *
+     * Density sampling (n_samples_per_update evenly spaced samples per
+     * window): each sample sums the weights of all negative-charge species
+     * inside [n_region_lo, n_region_hi] and divides by the region length,
+     * giving the region-averaged density in m^-3 (see
+     * WarpXParticleContainer::sumParticleWeightInZRange).
      *
      * PID update law (velocity/incremental form), applied when a window of
-     * n = round(P_controller_period/dt) steps completes:
+     * n = round(controller_period/dt) steps completes, with M_bar the
+     * window-averaged measurement and M_target = P_target or n_target:
      *
-     *   P_bar = (sum of per-step powers) / n
-     *   e_k   = (P_target - P_bar) / P_target            (dimensionless)
+     *   e_k   = (M_target - M_bar) / M_target            (dimensionless)
      *   J_0  <- clamp( J_0 * [ 1 + Kp*(e_k - e_{k-1})
      *                            + Ki*e_k
      *                            + Kd*(e_k - 2 e_{k-1} + e_{k-2}) ],
@@ -157,27 +183,39 @@ public:
      *
      * Gain units: Kp, Ki, Kd are all DIMENSIONLESS per-update gains acting
      * on the normalized error (e.g. Ki = 0.1 moves J_0 by 10% of the relative
-     * power error each controller period). Because the period is folded in,
-     * gains must be retuned if P_controller_period is changed. Kd = 0 is
-     * recommended: the derivative term amplifies the statistical noise of
-     * the PIC power measurement.
+     * error each controller period). Because the period is folded in, gains
+     * must be retuned if controller_period is changed. Kd = 0 is recommended:
+     * the derivative term amplifies the statistical noise of the PIC
+     * measurement.
      *
      * The first m_ctrl_delay_periods windows measure and record history but
      * do not update J_0, letting the plasma converge first. The first active
      * update (and the first update after SetJ0) bootstraps
      * e_{k-1} = e_{k-2} = e_k, so only the Ki term acts.
      *
-     * \param[in] mpc   All particle species (power buffers sampled from here)
+     * \param[in] mpc   All particle species (measurements sampled from here)
      * \param[in] time  Simulation time at the end of the current step
      * \param[in] dt    Timestep (used once to convert the period to steps)
      * \param[in] step  Current step index (for history records)
      */
-    void TickPowerController(
+    void TickController(
         MultiParticleContainer& mpc,
         amrex::Real time,
         amrex::Real dt,
         int step
     );
+
+    /**
+     * \brief Cache the indices of the negative-charge species whose summed
+     *        density the Density control mode regulates.
+     *
+     * Called once from the WarpX constructor (after species construction)
+     * when the Density mode is active. Aborts if no negative species exists.
+     */
+    void InitDensityControl(MultiParticleContainer const& mpc);
+
+    /** Returns the active control mode (None if the controller is off). */
+    [[nodiscard]] ICPControlMode GetControlMode() const { return m_control_mode; }
 
     /** Returns the current J_0 amplitude [A/m^2]. */
     [[nodiscard]] amrex::Real GetJ0() const { return m_j0_current; }
@@ -185,16 +223,22 @@ public:
     /**
      * \brief Set the J_0 amplitude [A/m^2] (clamped to [J_0_min, J_0_max]).
      *
-     * Also restarts the averaging window (so power measured under the old
-     * amplitude is not mixed in) and re-bootstraps the PID error history
+     * Also restarts the averaging window (so measurements taken under the
+     * old amplitude are not mixed in) and re-bootstraps the PID error history
      * (the next update is Ki-only). Must be called on all MPI ranks.
      * Aborts if the controller mode is not enabled.
      */
     void SetJ0(amrex::Real j0);
 
     /** Returns the mean absorbed power [W/m^2] of the last completed window
-     *  (0 before the first window completes). */
-    [[nodiscard]] amrex::Real GetLastMeanPower() const { return m_last_mean_power; }
+     *  (0 before the first window completes). Meaningful only in Power mode;
+     *  the Python binding enforces the mode. */
+    [[nodiscard]] amrex::Real GetLastMeanPower() const { return m_last_measurement; }
+
+    /** Returns the region-averaged plasma density [m^-3] of the last
+     *  completed window (0 before the first window completes). Meaningful
+     *  only in Density mode; the Python binding enforces the mode. */
+    [[nodiscard]] amrex::Real GetLastMeanDensity() const { return m_last_measurement; }
 
     /** Returns the recorded history of controller updates (bounded by
      *  icp_heating.controller_history_size, oldest entries dropped first). */
@@ -443,24 +487,35 @@ private:
     ICPIntegrator m_integrator = ICPIntegrator::Euler;  ///< selected time integrator
 
     // -------------------------------------------------------------------------
-    // PID power controller parameters and state
+    // PID controller parameters and state (power or density mode)
     // -------------------------------------------------------------------------
 
     bool m_controller_enabled = false;  ///< true iff j0_amplitude(J_0,z,t) form given
+    ICPControlMode m_control_mode = ICPControlMode::None;  ///< what the PID regulates
 
     amrex::Real m_j0_initial = 0.0;  ///< icp_heating.J_0_initial [A/m^2]
     /** Current J_0 value passed to the amplitude parser. Kept at 1.0 in the
      *  legacy (non-controller) forms, where the parser does not use it. */
     amrex::Real m_j0_current = 1.0;
-    amrex::Real m_P_target = 0.0;    ///< target absorbed power [W/m^2]
+    amrex::Real m_P_target = 0.0;    ///< target absorbed power [W/m^2] (Power mode)
+    amrex::Real m_n_target = 0.0;    ///< target plasma density [m^-3] (Density mode)
 
-    amrex::Real m_ctrl_period_seconds = 0.0;  ///< controller period [s] (default 1/frequency)
+    amrex::Real m_ctrl_period_seconds = 0.0;  ///< controller period [s] (default 5/frequency)
     int m_ctrl_period_steps = -1;             ///< period in steps; computed on first tick
 
+    // Density-mode measurement region and sampling cadence
+    amrex::Real m_n_region_lo = 0.0;  ///< region lower z bound [m] (default: center - L/8)
+    amrex::Real m_n_region_hi = 0.0;  ///< region upper z bound [m] (default: center + L/8)
+    int m_n_samples_per_update = 100; ///< requested density samples per window
+    int m_n_sample_interval = -1;     ///< steps between samples; computed on first tick
+    /** Indices (into MultiParticleContainer) of the negative-charge species
+     *  whose summed density is regulated. Filled by InitDensityControl. */
+    amrex::Vector<int> m_negative_species;
+
     /** PID gains. All three are DIMENSIONLESS per-update gains on the
-     *  normalized error e = (P_target - P_bar)/P_target: the controller
+     *  normalized error e = (target - measurement)/target: the controller
      *  period T is folded in (Ki = Ki_continuous*T, Kd = Kd_continuous/T),
-     *  so they must be retuned if P_controller_period changes.
+     *  so they must be retuned if controller_period changes.
      *  Kd = 0 (default) is recommended — the derivative term amplifies
      *  PIC measurement noise. */
     amrex::Real m_pid_kp = 0.2;
@@ -472,12 +527,17 @@ private:
 
     /** Number of controller periods to wait (measuring, not acting) before
      *  the PID becomes active. */
-    int m_ctrl_delay_periods = 50;
+    int m_ctrl_delay_periods = 10;
     int m_windows_completed = 0;  ///< completed averaging windows since start
 
-    amrex::Real m_power_accum = 0.0;    ///< sum of per-step powers in current window [W/m^2]
-    int m_steps_in_window = 0;          ///< steps accumulated in current window
-    amrex::Real m_last_mean_power = 0.0;  ///< P_bar of last completed window [W/m^2]
+    /** Running sum of the current window's measurements: per-step powers
+     *  [W/m^2] in Power mode, density samples [m^-3] in Density mode. */
+    amrex::Real m_meas_accum = 0.0;
+    int m_steps_in_window = 0;    ///< steps accumulated in current window
+    int m_samples_in_window = 0;  ///< density samples taken in current window
+    /** Window-averaged measurement of the last completed window:
+     *  P_bar [W/m^2] in Power mode, n_bar [m^-3] in Density mode. */
+    amrex::Real m_last_measurement = 0.0;
 
     amrex::Real m_e_prev  = 0.0;  ///< e_{k-1}
     amrex::Real m_e_prev2 = 0.0;  ///< e_{k-2}
