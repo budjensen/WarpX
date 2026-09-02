@@ -21,6 +21,7 @@
 #include <AMReX_REAL.H>
 #include <AMReX_Vector.H>
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <string>
@@ -52,18 +53,15 @@ void ReadEnergyValueFile(
 }
 
 void SanityCheckEnergyGrid(
-    amrex::Vector<amrex::ParticleReal> const& energies,
-    amrex::ParticleReal const dE)
+    amrex::Vector<amrex::ParticleReal> const& energies)
 {
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        dE > 0.0,
-        "xi_data energy grid spacing must be positive.");
-
-    // Confirm that the input data was provided on a uniform energy grid.
+    // The energy grid does not need to be evenly spaced, but it must be sorted in
+    // strictly increasing order for the bisection search and linear interpolation
+    // used in `MCCXiView::getXi` to work correctly.
     for (unsigned int i = 1; i < energies.size(); ++i) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            (std::abs(energies[i] - energies[i-1] - dE) < dE / 100.0),
-            "xi_data energy grid is not evenly spaced.");
+            (energies[i] > energies[i-1]),
+            "xi_data energy grid must be sorted in strictly increasing order.");
     }
 }
 
@@ -167,15 +165,36 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
 
             m_xi_energy_lo = m_xi_energies[0];
             m_xi_energy_hi = m_xi_energies[xi_grid_size-1];
-            m_xi_dE = (m_xi_energy_hi - m_xi_energy_lo)
-                    / static_cast<amrex::ParticleReal>(xi_grid_size - 1);
             m_xi_lo = m_xi_values_h[0];
             m_xi_hi = m_xi_values_h[xi_grid_size-1];
 
-            SanityCheckEnergyGrid(m_xi_energies, m_xi_dE);
+            SanityCheckEnergyGrid(m_xi_energies);
+
+            // The xi energy grid does not need to be evenly spaced. Compare the
+            // smallest and largest spacing to decide whether `MCCXiView::getXi` can use
+            // the fast, search-free index lookup instead of a bisection search.
+            amrex::ParticleReal xi_dE_min = m_xi_energy_hi - m_xi_energy_lo;
+            amrex::ParticleReal xi_dE_max = 0;
+            for (int i = 1; i < xi_grid_size; ++i) {
+                const amrex::ParticleReal dE_i = m_xi_energies[i] - m_xi_energies[i-1];
+                xi_dE_min = std::min(xi_dE_min, dE_i);
+                xi_dE_max = std::max(xi_dE_max, dE_i);
+            }
+            // Same tolerance that the evenly-spaced grid check used historically.
+            m_xi_uniform = (xi_dE_max - xi_dE_min < xi_dE_min / 100.0);
+            // For an evenly spaced grid, keep the exact step that the fast lookup
+            // expects; this also reproduces the pre-existing xi values bit-for-bit.
+            m_xi_dE = m_xi_uniform
+                    ? (m_xi_energy_hi - m_xi_energy_lo)
+                      / static_cast<amrex::ParticleReal>(xi_grid_size - 1)
+                    : xi_dE_min;
 
 #ifdef AMREX_USE_GPU
+            m_xi_energies_d.resize(m_xi_energies.size());
             m_xi_values_d.resize(m_xi_values_h.size());
+            amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+                                  m_xi_energies.begin(), m_xi_energies.end(),
+                                  m_xi_energies_d.begin());
             amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
                                   m_xi_values_h.begin(), m_xi_values_h.end(),
                                   m_xi_values_d.begin());
@@ -451,12 +470,16 @@ BackgroundMCCCollision::makeXiView () const
     xi_view.m_dE = m_xi_dE;
     xi_view.m_lo = m_xi_lo;
     xi_view.m_hi = m_xi_hi;
+    xi_view.m_uniform = m_xi_uniform;
+    xi_view.m_grid_size = static_cast<int>(m_xi_energies.size());
 
     if (m_anisotropic_scatter && !m_use_screened_coulomb) {
 #ifdef AMREX_USE_GPU
         xi_view.m_data = m_xi_values_d.data();
+        xi_view.m_energies = m_xi_energies_d.data();
 #else
         xi_view.m_data = m_xi_values_h.data();
+        xi_view.m_energies = m_xi_energies.data();
 #endif
     }
 

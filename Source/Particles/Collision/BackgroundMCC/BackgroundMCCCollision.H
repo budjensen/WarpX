@@ -175,6 +175,7 @@ private:
     amrex::Vector<amrex::ParticleReal> m_xi_energies;
     amrex::Gpu::HostVector<amrex::ParticleReal> m_xi_values_h;
 #ifdef AMREX_USE_GPU
+    amrex::Gpu::DeviceVector<amrex::ParticleReal> m_xi_energies_d;
     amrex::Gpu::DeviceVector<amrex::ParticleReal> m_xi_values_d;
 #endif
     amrex::ParticleReal m_xi_energy_lo = 0;
@@ -182,6 +183,7 @@ private:
     amrex::ParticleReal m_xi_dE = 0;
     amrex::ParticleReal m_xi_lo = 0;
     amrex::ParticleReal m_xi_hi = 0;
+    bool m_xi_uniform = false;
 
     amrex::ParticleReal m_mass1;
 
