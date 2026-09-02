@@ -2760,20 +2760,43 @@ evolved as :math:`dE_y/dt = (J_{y,\mathrm{target}} - J_{y,\mathrm{cond}})/\epsil
     Time integrator for the :math:`E_y` ODE: ``euler``, ``ab2``, ``rk2`` or ``rk4``.
 
 When the ``j0_amplitude(J_0,z,t)`` form is used, a PID controller adjusts
-``J_0`` every controller period so that the domain-integrated, period-averaged
-inductive power absorbed by the plasma converges to a target. The absorbed
-power is measured from the per-species power-deposition tracking buffers
-(y-component), which are force-enabled for all species in this mode.
+``J_0`` every controller period. Exactly one of two **exclusive control
+modes** must be selected by the target input: ``P_target`` (power control)
+converges the domain-integrated, period-averaged inductive power absorbed by
+the plasma, measured from the per-species power-deposition tracking buffers
+(y-component), which are force-enabled for all species in this mode;
+``n_target`` (density control) converges the period-averaged number density
+of all negative-charge species (summed) inside a z-region.
 Requires ``amr.max_level = 0``.
 
 * ``icp_heating.J_0_initial`` (`float`, in A/m^2)
     Starting amplitude. Required in controller mode.
 
 * ``icp_heating.P_target`` (`float`, in W/m^2)
-    Target absorbed inductive power. Required in controller mode.
+    Target absorbed inductive power (power control mode). Exactly one of
+    ``P_target`` and ``n_target`` must be given.
 
-* ``icp_heating.P_controller_period`` (`float`, in s) optional (default ``1/icp_heating.frequency``)
-    Averaging window and update period of the controller.
+* ``icp_heating.n_target`` (`float`, in m^-3)
+    Target plasma density (density control mode): the summed number density
+    of all species with negative charge, averaged over
+    ``[n_region_lo, n_region_hi]``. Exactly one of ``P_target`` and
+    ``n_target`` must be given. Aborts at initialization if no negative
+    species exists.
+
+* ``icp_heating.controller_period`` (`float`, in s) optional (default ``5/icp_heating.frequency``)
+    Averaging window and update period of the controller (both modes).
+    ``icp_heating.P_controller_period`` is accepted as a legacy alias;
+    do not give both.
+
+* ``icp_heating.n_region_lo``, ``icp_heating.n_region_hi`` (`float`, in m) optional (default: central 25% of the domain)
+    z bounds of the density measurement region (density control mode only).
+    The default is the domain midpoint :math:`\pm L/8`.
+
+* ``icp_heating.n_samples_per_update`` (`int`) optional (default `100`)
+    Number of evenly spaced density measurements per controller period
+    (density control mode only), capped at one per step. Each measurement
+    sums the negative-species weights inside the region and divides by the
+    region length; the window's mean density is the average of the samples.
 
 * ``icp_heating.pid_kp``, ``icp_heating.pid_ki``, ``icp_heating.pid_kd`` (`float`) optional (defaults `0.2`, `0.1`, `0`)
     PID gains of the velocity-form update
@@ -2782,26 +2805,28 @@ Requires ``amr.max_level = 0``.
 
         J_0 \leftarrow J_0\,[\,1 + K_p (e_k - e_{k-1}) + K_i e_k
             + K_d (e_k - 2 e_{k-1} + e_{k-2})\,],
-        \qquad e_k = \frac{P_\mathrm{target} - \bar{P}}{P_\mathrm{target}}.
+        \qquad e_k = \frac{M_\mathrm{target} - \bar{M}}{M_\mathrm{target}},
 
+    where :math:`\bar{M}` is the window-averaged measurement (power or
+    density) and :math:`M_\mathrm{target}` the corresponding target.
     All three gains are **dimensionless per-update gains** acting on the
     normalized error: the controller period is folded into them
     (:math:`K_i = K_i'\,T`, :math:`K_d = K_d'/T` relative to the
     continuous-time gains), so they must be retuned if
-    ``P_controller_period`` changes. For example, ``pid_ki = 0.1`` moves
-    ``J_0`` by 10% of the relative power error each controller period.
+    ``controller_period`` changes. For example, ``pid_ki = 0.1`` moves
+    ``J_0`` by 10% of the relative error each controller period.
     Keeping ``pid_kd = 0`` (the default) is recommended, since the
-    derivative term amplifies the statistical noise of the PIC power
-    measurement.
+    derivative term amplifies the statistical noise of the PIC measurement.
 
 * ``icp_heating.J_0_min``, ``icp_heating.J_0_max`` (`float`, in A/m^2) optional (defaults ``0.01*J_0_initial``, ``100*J_0_initial``)
     Clamps on ``J_0``. Set them explicitly if they must stay fixed across
     restarts (the defaults scale with ``J_0_initial``).
 
-* ``icp_heating.controller_delay_N_periods`` (`int`) optional (default `50`)
+* ``icp_heating.controller_delay_N_periods`` (`int`) optional (default `10`)
     Number of controller periods to wait before the PID becomes active.
-    During the delay the power is still measured and recorded in the history,
-    but ``J_0`` is not updated, letting the simulation converge first.
+    During the delay the measurement is still taken and recorded in the
+    history, but ``J_0`` is not updated, letting the simulation converge
+    first.
 
 * ``icp_heating.controller_history_size`` (`int`) optional (default `1000`)
     Maximum number of controller updates kept in the in-memory history
@@ -2811,7 +2836,11 @@ Requires ``amr.max_level = 0``.
     On a checkpoint restart, restore ``J_0`` and the PID state from the
     ``ICPController_data.txt`` sidecar file written into each checkpoint.
     Checkpoints written before this feature existed fall back to
-    ``J_0_initial`` with a printed notice.
+    ``J_0_initial`` with a printed notice; sidecars written by the
+    power-only controller version (format version 1) restore normally in
+    power mode. If the checkpoint was written in the other control mode,
+    only ``J_0`` and the completed-window count are restored and the PID
+    error history is re-bootstrapped, with a warning.
 
 Grid types (collocated, staggered, hybrid)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
